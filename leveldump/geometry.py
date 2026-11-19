@@ -541,6 +541,9 @@ class TexturePool:
         OBJ material and {vertex: (u, v)}; `src_face` is the original face the
         record came from (kept) or its donor (new)."""
         import textures
+        if src_face.attr & 0xC0:
+            # a trigger face (portal etc.): textoff is its signal's offset, not a texture
+            return rec[6]
         if mname == "untextured":
             if rec[6] != 0xFFFF:
                 self.changed += 1

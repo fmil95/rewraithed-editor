@@ -222,10 +222,7 @@ def apply_intros(data, obj_path, scale=0.01, template_levels=()):
     d.pack("i", d.ptr(0x00) + 0x08, len(records))
 
     for typ in add_types:
-        _, term = _object_names(d)
-        d.insert(term, 16)
-        name = typ.encode("latin-1")[:15]
-        d.body[term: term + 16] = name + b"\0" * (16 - len(name))
+        _insert_object_name(d, typ)
         report.append("%s added to the unit's object list" % typ)
 
     report.insert(0, "intros: %d -> %d (%d moved, %d turned, %d added, %d deleted)" % (
@@ -276,10 +273,21 @@ def add_object_type(data, typ):
     names, term = _object_names(d)
     if typ in names:
         return data, False
+    _insert_object_name(d, typ)
+    return d.to_bytes(), True
+
+
+def _insert_object_name(d, typ):
+    """Insert a 16-byte name in front of the list's 0xFF end byte. In an empty
+    list that byte is where Level.objectNameList points, and an insertion moves
+    every pointer at or behind the insertion point, so the list pointer is put
+    back to the start afterwards (else it would skip the new name)."""
+    start = d.ptr(0x8C)
+    _, term = _object_names(d)
     d.insert(term, 16)
+    d.pack("I", 0x8C, start)
     name = typ.encode("latin-1")[:15]
     d.body[term: term + 16] = name + b"\0" * (16 - len(name))
-    return d.to_bytes(), True
 
 
 def arrow_obj(name, pos, rot_z, scale=0.01, first=1):

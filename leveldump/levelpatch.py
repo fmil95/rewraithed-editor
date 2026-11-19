@@ -142,7 +142,11 @@ def verify(data):
     bad = []
     import units
     try:
-        units.walk_signals(L.drm)
+        starts = {m for m, _ in units.walk_signals(L.drm)}
+        base = L.terrain.ptrs["signals"]
+        for fi, f in enumerate(L.terrain.faces):
+            if f.attr & 0xC0 and f.textoff != 0xFFFF and base + f.textoff not in starts:
+                bad.append("trigger face %d points at 0x%x, not at a MultiSignal" % (fi, base + f.textoff))
     except ValueError as e:
         bad.append("signal list: %s" % e)
     for tr in L.terrain.trees:

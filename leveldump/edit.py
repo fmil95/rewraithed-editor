@@ -80,13 +80,14 @@ class LevelEditor:
         self.spectral_colors = {}   # vertex -> (r, g, b) spectral colour
         self.warnings = []
         self.summary = {}
+        self.new_morph = set()      # vertices that get a morph entry
 
     # --- edits --------------------------------------------------------------
 
     def move_vertex(self, v, material=None, spectral=None):
-        """Set new positions (tree-local game units); a vertex without morph data
-        has one position for both realms, so `spectral` is then ignored unless
-        it equals the material one."""
+        """Set new positions (tree-local game units). A vertex without morph
+        data has one position for both realms; giving it a different spectral
+        position adds a morph entry for it (build())."""
         if material is not None:
             old_m, old_s = self.material[v], self.spectral[v]
             self.material[v] = tuple(int(c) for c in material)
@@ -97,10 +98,10 @@ class LevelEditor:
                 self.spectral[v] = self.material[v]
         if spectral is not None:
             spectral = tuple(int(c) for c in spectral)
-            if v in self.morph_index:
+            if v in self.morph_index or spectral != self.material[v]:
                 self.spectral[v] = spectral
-            elif spectral != self.spectral[v]:
-                self.warnings.append("vertex %d has no morph data; its spectral position follows the material one" % v)
+                if v not in self.morph_index:
+                    self.new_morph.add(v)
 
     def set_color(self, v, rgb, spectral_rgb=None):
         self.colors[v] = rgb
@@ -143,6 +144,27 @@ class LevelEditor:
             self.level = L = _reparse(self.drm)
             t = L.terrain
         d = self.drm
+
+        # morph entries for vertices that had none: MorphDiffList ends with an
+        # entry whose vindex is negative; the new entries go in front of it
+        # (the block is padded after a fresh end entry, never before it)
+        added_morph = 0
+        new_morph = sorted(v for v in self.new_morph if self.spectral[v] != self.material[v])
+        if new_morph:
+            mdl = t.ptrs["MorphDiffList"]
+            if mdl is None:
+                raise SystemExit("this unit has no morph list; spectral shapes can't be added")
+            n_old = len(t.morph_vertices)
+            end = mdl + n_old * SIZEOF_MORPHVERTEX
+            size = (len(new_morph) * SIZEOF_MORPHVERTEX + SIZEOF_MORPHVERTEX + 3) & ~3
+            terminator = bytes(d.body[end:end + SIZEOF_MORPHVERTEX])
+            d.insert(end, size)
+            d.body[end + len(new_morph) * SIZEOF_MORPHVERTEX: end + (len(new_morph) + 1) * SIZEOF_MORPHVERTEX] =                 terminator
+            for i, v in enumerate(new_morph):
+                self.morph_index[v] = n_old + i
+            added_morph = len(new_morph)
+            self.level = L = _reparse(d)
+            t = L.terrain
 
         # vertices, colours, morph data -----------------------------------
         for v in moved:
@@ -203,7 +225,7 @@ class LevelEditor:
 
         self.summary = {
             "moved_vertices": len(moved), "changed_faces": len(faces),
-            "normals_added": added, "leaves_rebuilt": leaves_done, "nodes_rebuilt": nodes_done,
+            "normals_added": added, "morph_entries_added": added_morph, "leaves_rebuilt": leaves_done, "nodes_rebuilt": nodes_done,
             "recoloured_vertices": len(self.colors),
         }
         return d.to_bytes()

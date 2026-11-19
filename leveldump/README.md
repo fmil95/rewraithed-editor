@@ -94,6 +94,30 @@ Tested with Blender: extruding 5 floor triangles of `under1` into a platform
 300 units high (7 new vertices, 19 new faces), and deleting the same 5 faces.
 Both pass all checks and load in the port.
 
+### Different shapes in the two realms
+
+A vertex's spectral position comes from its morph entry (`MorphDiffList`:
+material position plus spectral delta) and its spectral colour from
+`MorphColorList`. To give geometry its own spectral look:
+
+1. add or edit it in the material OBJ and apply that (`--material-obj`);
+2. export the result again, edit the *spectral* OBJ in Blender (move vertices,
+   paint vertex colours; don't add or delete anything) and apply it with
+   `--spectral-obj ... --spectral-map ...`.
+
+A vertex without a morph entry that gets a different spectral position now gets
+one: new entries go in front of the list's end entry (`vindex` < 0), the block
+being padded after a fresh end entry. Bounds, error fields and spectral normals
+are rebuilt for both realms, so collision follows the spectral shape there too.
+
+Tested in `city9`: an obelisk next to Raziel's start, straight and brick-textured
+in the material realm, twisted, leaning, 35 % taller and green in the spectral realm.
+
+Trigger faces (attr & `0xC0`) keep their signal offset in every edit: texture
+handling never touches them (an earlier version would have cleared them when
+the OBJ marked them "untextured", disconnecting the unit's portals), and every
+tool checks that each trigger face points at a `MultiSignal`.
+
 ### Textures
 
 With `--disc`, `leveldump.py --obj` also writes `<unit>.mtl` and
@@ -201,9 +225,16 @@ Commands that name things in the source unit are adjusted:
 * 14 (the stream units the monster may be in) becomes the destination unit;
 * the rest (behaviours, hit points, ranges, age, the spectral flag, respawn) is kept.
 
+Some objects need other object types loaded without placing one: every unit with
+hunters also loads their weapon (`fthrow` or `xbow`). `--extra-objects
+fthrow:city4` appends such types to the object list and copies their files.
+Object sound files (`\kain2\sfx\object\<type>\<type>.snf`, `.smf`) are copied too.
+
 Tested in `under1`: Raziel's start marker moved onto a new platform (he spawns on
 it), an urn (`urnx`) copied from `city9`, and a sluagh (spectral-realm enemy) copied
-from `city9` with its data block.
+from `city9` with its data block. In `city9`: two vwraiths (spectral realm, from
+`city20`) and two flamethrower hunters (material realm, from `city4`, with
+`--extra-objects fthrow:city4`) near Raziel's start.
 
 ### Portals and new units (units.py)
 
