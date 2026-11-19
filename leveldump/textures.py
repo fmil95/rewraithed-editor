@@ -98,8 +98,11 @@ def texture_entries(level):
 
 
 def face_texture(level, entries, face):
-    """(tpage, clut, [(u, v) for v0, v1, v2]) or None for an untextured face."""
-    if face.textoff == 0xFFFF or face.textoff % 12 or face.textoff // 12 >= len(entries):
+    """(tpage, clut, [(u, v) for v0, v1, v2]) or None for an untextured face.
+
+    Signal faces (attr & 0xC0, e.g. portal triggers) use textoff as an offset
+    into Terrain.signals, not as a texture."""
+    if face.attr & 0xC0 or face.textoff == 0xFFFF or face.textoff % 12 or face.textoff // 12 >= len(entries):
         return None
     e = entries[face.textoff // 12]
     return e[5], e[2], [(e[0], e[1]), (e[3], e[4]), (e[6], e[7])]

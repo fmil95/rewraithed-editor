@@ -205,6 +205,50 @@ Tested in `under1`: Raziel's start marker moved onto a new platform (he spawns o
 it), an urn (`urnx`) copied from `city9`, and a sluagh (spectral-realm enemy) copied
 from `city9` with its data block.
 
+### Portals and new units (units.py)
+
+How a portal works:
+
+* `Terrain.StreamUnits` lists `StreamUnitPortal` records: `"<unit>,<n>"` (the unit
+  on the other side and the number of the portal there), this portal's own number
+  (`MSignalID`), the other unit's stream ID, a box and two triangles. The streaming
+  code loads the neighbour from it and lines the two units up.
+* The crossing is two terrain faces in the tree with ID -1 (face attr `0x44`). For
+  faces with attr & `0xC0`, `TFace.textoff` is an offset into `Terrain.signals`
+  (a `MultiSignal`: `numSignals`, `signalNum`, `flags`, signals), not a texture;
+  crossing the face fires it (`COLLIDE_LineWithSignals`). A portal's signal is id
+  18, "stream level": `currentnum`, `streamID`, `toname[16]`, the same data as the
+  record. Signal lists end with id 15; payload lengths are in `signalInfoList`.
+* A unit's stream ID is `LOAD_HashUnit(name)`. Every time Raziel enters a unit, the
+  game reloads that unit's level and `.crm` (`LoadLevels`). A unit needs a bigfile
+  directory with its ID, else the game stops with "Could not read directory hash".
+
+```
+# a new unit: a copy of under2 called under5, tinted, without its exit to under4
+python units.py --disc <path>/KAIN2.img --install <exe folder>/mods new under2 under5 \
+    --tint 255 110 110 --disable-portal under4
+# make under1's portal lead to under5 instead of under2
+python units.py --disc <path>/KAIN2.img --install <exe folder>/mods retarget under1 under2 under5
+```
+
+* `new` copies the source unit's level (from the mods folder if it has one, else the
+  disc), sets the name and stream ID, updates the monsters' valid-unit lists,
+  copies the `.crm` (and `.snf`/`.smf` sound, if any), and adds
+  `<new> = <source>` to `mods/units.txt`. The name must be an area name plus a
+  number (it sets the path `\kain2\area\<area>\bin\<unit>.drm`) and its ID must not
+  collide with an existing unit's.
+* For each line of `units.txt` the port (`port/src/mod_files.c`) gives the new unit
+  a bigfile directory: a copy of the source unit's directory (its object and sound
+  files stay on the disc, so their names needn't be known) plus every mods file,
+  and adds it to the directory table the game reads at startup.
+* `retarget` changes a unit's portal records and stream signals from one
+  destination to another; `disable` removes a portal record and empties its
+  signal. Both sides of a connection must agree: `"<B>,<n>"` in A must be the
+  number of B's portal back to A, and the other way round.
+
+Tested: `under5`, a red-tinted copy of `under2`, reached from `under1` through its
+portal, and loading directly with `-area under5`.
+
 ## Recompiling BSP trees (bspbuild.py)
 
 `bspbuild.py` rebuilds every non-empty BSP tree of a level from its faces:
@@ -263,6 +307,7 @@ the original, frame for frame, including Raziel being stopped by a pillar.
 | `textures.py` | `.crm` in video memory, `TextureFT3` entries, texture page images |
 | `newtex.py` | new images: PNG reading, 16-colour reduction, placing into the `.crm` |
 | `vramspace.py` | which parts of a unit's video memory are used, and free spots |
+| `units.py` | portals (retarget, disable) and new units |
 | `intros.py` | intros as Blender arrows, and moving, adding and deleting them |
 | `geometry.py` | edits that add or delete vertices and faces (used by `levelpatch.py`) |
 | `bsp.py` | BSP compiler, tree layout, and the engine's traversal for checking |
