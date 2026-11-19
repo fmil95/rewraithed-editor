@@ -231,6 +231,8 @@ def main(argv=None):
     ap.add_argument("--bigfile", default="BIGFILE.DAT", help="name of the bigfile on the disc")
     ap.add_argument("--obj", metavar="DIR", help="write <unit>_material.obj and <unit>_spectral.obj")
     ap.add_argument("--scale", type=float, default=0.01, help="OBJ scale factor (default 0.01)")
+    ap.add_argument("--no-textures", action="store_true", help="OBJ without UVs and texture pages")
+    ap.add_argument("--crm", help="the unit's .crm (textures) when reading a --drm file")
     ap.add_argument("--json", metavar="PATH", help="write everything as JSON (file, or dir for several units)")
     ap.add_argument("--extract", metavar="DIR", help="also save the raw .drm read from the disc")
     ap.add_argument("--nodes", action="store_true", help="print every BSP node and leaf")
@@ -259,7 +261,13 @@ def main(argv=None):
         L = lvl.parse_level(data)
         report(L, unit, args)
         if args.obj:
-            for path in objexport.export(L, args.obj, unit, args.scale):
+            crm = None
+            if args.disc and not args.no_textures:
+                crm = bf.read_file(disc.level_path(unit).replace(".drm", ".crm"), unit)
+            elif args.crm:
+                with open(args.crm, "rb") as f:
+                    crm = f.read()
+            for path in objexport.export(L, args.obj, unit, args.scale, crm=crm):
                 print("wrote", path)
         if args.json:
             path = args.json

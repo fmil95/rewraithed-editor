@@ -144,9 +144,9 @@ def verify(data):
         st = analyze.walk(tr)
         bad += ["tree %d: %s" % (tr.index, p) for p in st.problems]
         for realm, bc in analyze.check_leaves(L, tr, mat, spec).items():
-            if bc.count and bc.box_contains != bc.count:
+            if bc.count and bc.box_contains1 != bc.count:   # the original data is up to 1 unit off
                 bad.append("tree %d: %d %s leaf boxes do not contain their vertices"
-                           % (tr.index, bc.count - bc.box_contains, realm))
+                           % (tr.index, bc.count - bc.box_contains1, realm))
         sp, er = analyze.check_nodes(L, st, mat, spec)
         for realm, bc in sp.items():
             if bc.max_overshoot > 3:
@@ -167,6 +167,9 @@ def main(argv=None):
     ap.add_argument("--map", help="map for --material-obj (default <obj export>.map.json next to it)")
     ap.add_argument("--spectral-map", help="map for --spectral-obj")
     ap.add_argument("--no-colors", action="store_true", help="ignore vertex colours in the OBJ")
+    ap.add_argument("--intros-obj", help="edited <unit>_intros.obj (move, turn, duplicate, delete intros)")
+    ap.add_argument("--intro-templates", default="", metavar="UNITS",
+                    help="comma-separated units to copy new intro types from (with --disc), e.g. city9")
     ap.add_argument("--hill", nargs=4, type=float, metavar=("X", "Y", "RADIUS", "HEIGHT"),
                     help="test edit: smooth bump of HEIGHT game units around (X, Y)")
     ap.add_argument("--tint", nargs=3, type=int, metavar=("R", "G", "B"), help="colour the --hill towards this")
@@ -186,6 +189,20 @@ def main(argv=None):
         unit = lvl.parse_level(data).worldName or os.path.splitext(os.path.basename(args.drm))[0]
     if not (args.output or args.install):
         ap.error("give -o and/or --install")
+
+    if args.intros_obj:
+        import intros
+        tmpl = []
+        if args.intro_templates:
+            if not args.disc:
+                ap.error("--intro-templates needs --disc")
+            bf = disc.BigFile(args.disc)
+            tmpl = [lvl.parse_level(bf.read_level(u.strip())) for u in args.intro_templates.split(",") if u.strip()]
+        scale = 0.01
+        data, lines, new_types = intros.apply_intros(data, args.intros_obj, scale, tmpl)
+        for line in lines:
+            print(line)
+        args.new_object_types = new_types
 
     if args.material_obj and changes_layout(data, args.material_obj,
                                             args.map or _default_map(args.material_obj, unit, "material")):
@@ -217,16 +234,7 @@ def main(argv=None):
     if bad:
         return 1
 
-    paths = []
-    if args.output:
-        paths.append(args.output)
-    if args.install:
-        paths.append(os.path.join(args.install, *disc.level_path(unit).strip("\\").split("\\")))
-    for p in paths:
-        os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
-        with open(p, "wb") as f:
-            f.write(out)
-        print("wrote", p)
+    _write(args, unit, out)
     return 0
 
 
@@ -256,7 +264,50 @@ def changes_layout(data, obj_path, map_path):
                 tri = geometry._canon((vs[0], vs[j], vs[j + 1]))
                 seen[tri] = seen.get(tri, 0) + 1
     degenerate = {k: v for k, v in orig.items() if len(set(k)) < 3}
-    return seen != {k: v for k, v in orig.items() if k not in degenerate}
+    if seen != {k: v for k, v in orig.items() if k not in degenerate}:
+        return True
+    return geometry.obj_has_uv(objs) and textures_changed(L, objs, vmap)
+
+
+def textures_changed(L, objs, vmap):
+    """True if any face's material or UVs in the OBJ differ from the level."""
+    import geometry
+    import textures
+    t = L.terrain
+    entries = textures.texture_entries(L)
+
+    def q(x):
+        return max(0, min(255, int(round(x * 256))))
+
+    orig = {}
+    for f in t.faces:
+        tex = textures.face_texture(L, entries, f)
+        if tex is None:
+            val = ("untextured",)
+        else:
+            val = (textures.material_name(tex[0], tex[1]),) + tuple(
+                (v, uv) for v, uv in sorted(zip((f.v0, f.v1, f.v2), tex[2])))
+        key = geometry._canon((f.v0, f.v1, f.v2))
+        orig.setdefault(key, []).append(val)
+    for name, obj in objs.items():
+        if name not in vmap["objects"]:
+            continue
+        ids = vmap["objects"][name]["vertices"]
+        for pi, poly in enumerate(obj["f"]):
+            vs = [ids[i] for i in poly]
+            uvs = obj["fuv"][pi]
+            mname = (obj["fm"][pi] or "").split(".")[0]
+            for j in range(1, len(vs) - 1):
+                corners = (0, j, j + 1)
+                tri = geometry._canon(tuple(vs[c] for c in corners))
+                if mname == "untextured" or any(uvs[c] is None for c in corners):
+                    val = ("untextured",) if mname == "untextured" else None
+                else:
+                    val = (mname,) + tuple(sorted((vs[c], (q(uvs[c][0]), q(1.0 - uvs[c][1]))) for c in corners))
+                cands = orig.get(tri, [])
+                if val is not None and val not in cands:
+                    return True
+    return False
 
 
 def write_topology(args, data, unit):
@@ -291,6 +342,36 @@ def _write(args, unit, out):
         with open(p, "wb") as f:
             f.write(out)
         print("wrote", p)
+    new_types = getattr(args, "new_object_types", None) or {}
+    if new_types:
+        if not args.install:
+            print("warning: new object types %s need their files in the mods folder; use --install"
+                  % ", ".join(new_types))
+        else:
+            install_object_files(args.disc, new_types, args.install)
+
+
+def install_object_files(disc_path, new_types, mods_dir):
+    r"""Copy \kain2\object\<type>\<type>.* from the template unit's bigfile
+    directory into the mods folder (the game looks object files up in the
+    current unit's directory, where a type copied from elsewhere is missing)."""
+    bf = disc.BigFile(disc_path)
+    for typ, src_unit in new_types.items():
+        found = 0
+        for ext in disc.HASH_EXTENSIONS:
+            path = r"\kain2\object\%s\%s.%s" % (typ, typ, ext)
+            try:
+                blob = bf.read_file(path, src_unit)
+            except FileNotFoundError:
+                continue
+            dst = os.path.join(mods_dir, *path.strip("\\").split("\\"))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(dst, "wb") as f:
+                f.write(blob)
+            print("wrote", dst, "(object file from %s)" % src_unit)
+            found += 1
+        if not found:
+            print("warning: no files found for object type %s in %s" % (typ, src_unit))
 
 
 def _default_map(obj_path, unit, realm):

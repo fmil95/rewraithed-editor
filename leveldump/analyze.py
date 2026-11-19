@@ -139,6 +139,7 @@ class BoundCheck:
     box_exact: int = 0
     box_within1: int = 0          # every coordinate within 1 unit
     box_contains: int = 0
+    box_contains1: int = 0        # contains the vertices, allowing 1 unit (original spectral boxes)
     sphere_contains: int = 0      # every vertex within radius (+1 for rounding)
     sphere_center_is_box_center: int = 0
     sphere_center_is_mean: int = 0
@@ -182,6 +183,8 @@ def check_leaves(level: Level, tree: BSPTree, mat, spec):
                 bc.box_within1 += 1
             if all(stored[i] <= bb[i] for i in range(3)) and all(stored[i] >= bb[i] for i in range(3, 6)):
                 bc.box_contains += 1
+            if all(stored[i] <= bb[i] + 1 for i in range(3)) and all(stored[i] >= bb[i] - 1 for i in range(3, 6)):
+                bc.box_contains1 += 1
             _sphere_check(bc, sph, pts)
     return res
 

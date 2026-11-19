@@ -38,37 +38,60 @@ from level import SIZEOF_MORPHVERTEX, SIZEOF_TFACE, SIZEOF_TVERTEX, parse_level,
 
 
 def read_obj_full(path):
-    """{object: {"v": [(x, y, z, colour or None)], "f": [[local vertex indices]]}} in file order."""
+    """{object: {"v": [(x, y, z, colour or None)], "f": [[local vertex indices]],
+    "fm": [material name or None per face], "fuv": [[(u, v) or None per corner]]}}.
+
+    `has_uv` in the result tells whether the file had any texture coordinates."""
     objs = {}
-    order = []
     cur = None
+    mat = None
     gverts = []           # global index -> (object, local index)
+    vts = []
+
+    def new(name):
+        objs[name] = {"v": [], "f": [], "fm": [], "fuv": []}
+
     with open(path) as f:
         for line in f:
             if line.startswith("o "):
                 cur = line[2:].strip()
                 if cur not in objs:
-                    objs[cur] = {"v": [], "f": []}
-                    order.append(cur)
+                    new(cur)
             elif line.startswith("v "):
                 if cur is None:
                     cur = ""
-                    objs[cur] = {"v": [], "f": []}
-                    order.append(cur)
+                    new(cur)
                 p = [float(x) for x in line.split()[1:]]
                 gverts.append((cur, len(objs[cur]["v"])))
                 objs[cur]["v"].append((p[0], p[1], p[2], tuple(p[3:6]) if len(p) >= 6 else None))
+            elif line.startswith("vt "):
+                p = [float(x) for x in line.split()[1:3]]
+                vts.append((p[0], p[1]))
+            elif line.startswith("usemtl "):
+                mat = line[7:].strip()
             elif line.startswith("f "):
-                idx = []
+                idx, uvs = [], []
                 for tok in line.split()[1:]:
-                    i = int(tok.split("/")[0])
+                    parts = tok.split("/")
+                    i = int(parts[0])
                     i = i - 1 if i > 0 else len(gverts) + i
                     idx.append(gverts[i])
+                    if len(parts) > 1 and parts[1]:
+                        j = int(parts[1])
+                        uvs.append(vts[j - 1 if j > 0 else len(vts) + j])
+                    else:
+                        uvs.append(None)
                 owner = idx[0][0]
                 if any(o != owner for o, _ in idx):
                     raise SystemExit("a face in %s uses vertices of two objects" % path)
                 objs[owner]["f"].append([li for _, li in idx])
+                objs[owner]["fm"].append(mat)
+                objs[owner]["fuv"].append(uvs)
     return objs
+
+
+def obj_has_uv(objs):
+    return any(uv is not None for o in objs.values() for face in o["fuv"] for uv in face)
 
 
 def _canon(tri):
@@ -164,12 +187,15 @@ class TopologyEdit:
                     if col is not None and use_colors:
                         colours.setdefault(v, col)
                 level_ids.append(v)
-            for poly in obj["f"]:
+            for pi, poly in enumerate(obj["f"]):
                 vs = [level_ids[i] for i in poly]
+                uvs = obj["fuv"][pi]
                 for j in range(1, len(vs) - 1):       # fan triangulation
-                    tri = (vs[0], vs[j], vs[j + 1])
+                    corners = (0, j, j + 1)
+                    tri = tuple(vs[c] for c in corners)
                     if len(set(tri)) == 3:
-                        tree_faces[ti].append(tri)
+                        uv = {vs[c]: uvs[c] for c in corners} if all(uvs[c] is not None for c in corners) else None
+                        tree_faces[ti].append((tri, obj["fm"][pi], uv))
         missing = [n for n in vmap["objects"] if n not in handled]
         for n in missing:
             self.warnings.append("object %r is missing from the OBJ: its faces are deleted" % n)
@@ -267,6 +293,7 @@ class TopologyEdit:
             return min(cands, key=lambda fi: sum((centroid[fi][k] - p[k]) ** 2 for k in range(3)))
 
         pool = NormalPool(t.normals)
+        texpool = TexturePool(self.L)
         new_faces = []            # (v0, v1, v2, attr, sortPush, normal, textoff)
         new_morph = []
         membership = {}
@@ -275,7 +302,7 @@ class TopologyEdit:
         for tr in t.trees:
             ti = tr.index
             first = len(new_faces)
-            for tri in self.tree_faces.get(ti, []):
+            for tri, mname, uv in self.tree_faces.get(ti, []):
                 key = (ti, _canon(tri))
                 old = orig_by_canon.get(key)
                 if old:
@@ -305,6 +332,7 @@ class TopologyEdit:
                         mn = pool.index(ns) if ns is not None else nidx
                     rec = [tri[0], tri[1], tri[2], f.attr, f.sortPush, nidx, f.textoff]
                     inherited += 1
+                rec[6] = texpool.textoff(rec, mname, uv, f)
                 new_faces.append(rec)
                 new_morph.append(mn)
             membership[ti] = (first, len(new_faces) - first)
@@ -358,7 +386,8 @@ class TopologyEdit:
                 d.body[mcl + nv_old * 2: mcl + nv_old * 2 + len(extra)] = extra
         d.pack("i", terrain() + 0x10, nv_new)
 
-        # --- normals, faces, spectral normals ----------------------------
+        # --- texture entries, normals, faces, spectral normals -------------
+        added_textures = texpool.write(d)
         added_normals = pool.write(d, _TerrainView(d))
         fl = tptr(0x20)
         fbytes = b"".join(struct.pack("<HHHBbhH", *r) for r in new_faces)
@@ -382,7 +411,8 @@ class TopologyEdit:
         out, info = bsp.rebuild_level(d.to_bytes(), leaf_max=leaf_max, membership=membership)
         self.report.update({"faces": "%d -> %d" % (nf_old, len(new_faces)), "faces_kept": reused,
                             "faces_new": inherited, "vertices": "%d -> %d" % (nv_old, nv_new),
-                            "normals_added": added_normals})
+                            "normals_added": added_normals, "texture_entries_added": added_textures,
+                            "faces_retextured": texpool.changed})
         return out, info
 
     def _leaf_pointer_locations(self, d):
@@ -414,6 +444,68 @@ class TopologyEdit:
         while len(data) % 4:
             data += b"\0"
         d.replace(a, b, data, allow_into=allow)
+
+
+class TexturePool:
+    """TextureFT3 entries: keep a face's entry when its material and UVs match it,
+    reuse an identical entry, else append one (the list grows at
+    EndTextureList; textoff is a 16-bit byte offset, so about 5,400 entries max)."""
+
+    def __init__(self, level):
+        import textures
+        self.entries = textures.texture_entries(level)
+        self.orig_count = len(self.entries)
+        self.lookup = {}
+        for i, e in enumerate(self.entries):
+            self.lookup.setdefault(e, i)
+        self.changed = 0
+
+    def textoff(self, rec, mname, uv, src_face):
+        """Byte offset for face record `rec` (v0, v1, v2, ..., textoff) given the
+        OBJ material and {vertex: (u, v)}; `src_face` is the original face the
+        record came from (kept) or its donor (new)."""
+        import textures
+        if mname == "untextured":
+            if rec[6] != 0xFFFF:
+                self.changed += 1
+            return 0xFFFF
+        key = textures.parse_material(mname)
+        if key is None or uv is None:
+            return rec[6]
+        tpage, clut = key
+
+        def q(x):
+            return max(0, min(255, int(round(x * 256))))
+
+        uvq = [(q(uv[v][0]), q(1.0 - uv[v][1])) for v in rec[:3]]
+        attr = 0
+        old = None
+        if src_face.textoff != 0xFFFF and src_face.textoff % 12 == 0 and src_face.textoff // 12 < self.orig_count:
+            old = self.entries[src_face.textoff // 12]
+            attr = old[8]
+        entry = (uvq[0][0], uvq[0][1], clut, uvq[1][0], uvq[1][1], tpage, uvq[2][0], uvq[2][1], attr)
+        cur = rec[6]
+        if cur != 0xFFFF and cur % 12 == 0 and cur // 12 < len(self.entries) and self.entries[cur // 12] == entry:
+            return rec[6]
+        self.changed += 1
+        if entry not in self.lookup:
+            self.entries.append(entry)
+            self.lookup[entry] = len(self.entries) - 1
+        off = self.lookup[entry] * 12
+        if off > 0xFFF0:
+            raise SystemExit("too many texture entries")
+        return off
+
+    def write(self, d):
+        added = len(self.entries) - self.orig_count
+        if not added:
+            return 0
+        t_off = d.ptr(0)
+        end = d.ptr(t_off + 0x38)
+        d.insert(end, added * 12)       # EndTextureList (== end) moves to the new end
+        for i in range(self.orig_count, len(self.entries)):
+            d.pack("BBHBBHBBH", end + (i - self.orig_count) * 12, *self.entries[i])
+        return added
 
 
 class _TerrainView:

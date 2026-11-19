@@ -94,6 +94,75 @@ Tested with Blender: extruding 5 floor triangles of `under1` into a platform
 300 units high (7 new vertices, 19 new faces), and deleting the same 5 faces.
 Both pass all checks and load in the port.
 
+### Textures
+
+With `--disc`, `leveldump.py --obj` also writes `<unit>.mtl` and
+`<unit>_textures/page_<tpage>_<clut>.png`, and gives every textured face UVs and a
+material `tex_<tpage>_<clut>` (`--no-textures` leaves them out; for a `--drm`
+file pass the unit's `.crm` with `--crm`). In Blender (material preview or
+texture shading) the level shows its real textures. They're mostly grey: the game
+tints them with the vertex colours.
+
+Edit textures by giving faces one of the imported `tex_...` materials and moving
+their UVs within that 256x256 page (export with UVs and materials on). Then:
+
+* a face whose material and UVs still match its texture entry keeps it;
+* otherwise an identical entry is reused, or a new one is appended to the
+  texture list (`TextureFT3`, at most about 5,400 entries per unit). A new entry
+  keeps the old entry's flag bits (`attr`: 0x1000, 0x2000, 0x4000, 0x8000, which
+  collision and physics read);
+* material `untextured` removes a face's texture; a face without UVs keeps its
+  texture (new faces: a neighbour's).
+
+UVs are rounded to whole texels (u = U * 256, v = (1 - V) * 256, 0..255). Only
+textures already in the unit's `.crm` can be used; painting new texture
+images into the `.crm` isn't supported yet.
+
+How the textures are stored: a unit's `.crm` is a 36-byte header and raw 16-bit
+video memory, uploaded to (`Level.vramSize.x` + 512, `vramSize.y`), `w` x `h`
+halfwords (`STREAM.c`). `TextureFT3` holds `u0 v0 clut u1 v1 tpage u2 v2 attr`
+for the face's corners v0, v1, v2; `tpage` and `clut` are the usual PlayStation
+texture page and palette words. Every terrain page seen so far is 4-bit.
+
+Tested in `under1`: the extruded platform's top re-textured in Blender with the
+carved face from page `000c`/palette `34ba`, shown in the port.
+
+### Objects and markers (intros)
+
+`leveldump.py --obj` also writes `<unit>_intros.obj`: one small arrow per intro,
+named `intro_<UniqueID>_<type>`. The arrow's base is the intro's position and its
+tip points along its Z rotation (rotation 0 is drawn along +Y). Import it into the
+same Blender scene as the terrain, then:
+
+* **move or rotate an arrow** (Object Mode is fine) to move or turn the intro. A
+  spline attached to it (camera paths, moving objects) moves along;
+* **delete an arrow** to delete the intro;
+* **duplicate an arrow** (Shift+D; Blender names it `....001`) to add another intro
+  of that type, sharing the original's data block, without its spline;
+* **bring in an arrow from another unit's `_intros.obj`** (e.g. `intro_4598_urnx`
+  from `city9`) to add an object type that unit has. Pass the source units with
+  `--intro-templates`.
+
+```
+python levelpatch.py --disc <path>/KAIN2.img under1 --intros-obj edited_intros.obj \
+    --intro-templates city9 --install <rewraithed exe folder>/mods
+```
+
+`--intros-obj` combines with `--material-obj`. Existing UniqueIDs never change,
+because scripts refer to intros by UniqueID; new intros get fresh ones. Deleting an
+intro a script uses can break that script.
+
+Object files (`\kain2\object\<type>\<type>.drm`, `.crm`) are stored in the bigfile
+directory of each unit that uses the type, not in a shared place. A type copied
+from another unit is missing from this unit's directory, and the game stops with
+"file does not exist", so `--install` also copies the type's files from the
+template unit into the mods folder and appends the type to `Level.objectNameList`.
+Intros copied from another unit lose their data block (it lives in the other
+file), so types that need one (enemies have it) may not work that way yet.
+
+Tested in `under1`: Raziel's start marker moved onto a new platform (he spawns on
+it), and an urn (`urnx`) copied from `city9`.
+
 ## Recompiling BSP trees (bspbuild.py)
 
 `bspbuild.py` rebuilds every non-empty BSP tree of a level from its faces:
@@ -149,6 +218,8 @@ the original, frame for frame, including Raziel being stopped by a pillar.
 | `drm.py` | relocation table (`LOAD_RelocBinaryData` / `RESOLVE_Pointers`), writing back, inserting bytes with pointer fix-up |
 | `edit.py` | layout-preserving geometry edits and the rebuild of normals and BSP bounds |
 | `levelpatch.py` | command line for edits (OBJ or scripted) |
+| `textures.py` | `.crm` in video memory, `TextureFT3` entries, texture page images |
+| `intros.py` | intros as Blender arrows, and moving, adding and deleting them |
 | `geometry.py` | edits that add or delete vertices and faces (used by `levelpatch.py`) |
 | `bsp.py` | BSP compiler, tree layout, and the engine's traversal for checking |
 | `bspbuild.py` | command line: recompile a level's trees, check, write |
