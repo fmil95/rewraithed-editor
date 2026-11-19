@@ -135,6 +135,17 @@ def apply_intros(data, obj_path, scale=0.01, template_levels=()):
         for it in tl.terrain.intros:
             templates.setdefault(it.name, (tl, it))
 
+    # existing intros keep their place in the list (Blender writes objects in
+    # name order); new ones follow in the file's order
+    index = {it.UniqueID: i for i, it in enumerate(t.intros)}
+
+    def order(arrow):
+        m = NAME.match(arrow[0])
+        if m and m.group(1).isdigit() and not m.group(3) and int(m.group(1)) in index:
+            return (0, index[int(m.group(1))])
+        return (1, 0)
+    arrows = sorted(arrows, key=order)
+
     for name, verts in arrows:
         m = NAME.match(name)
         if not m or len(verts) < 2:

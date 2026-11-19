@@ -60,6 +60,11 @@ python levelpatch.py --disc <path>/KAIN2.img under1 --material-obj edited.obj \
     --map work/under1_material.obj.map.json --install <rewraithed exe folder>/mods
 ```
 
+To build on an earlier edit, export with `leveldump.py --mods <exe folder>/mods` and
+patch with `levelpatch.py ... --install <exe folder>/mods --from-mods`. Both then read
+units and object files from the mods folder where they are there, like the port does.
+The Blender add-on (`../blender/`) works this way.
+
 `--hill X Y RADIUS HEIGHT [--tint R G B]` is a scripted test edit that needs no
 Blender. Every output is re-read and checked before it's written. An OBJ
 exported by Blender without changes patches back to a byte-identical level.

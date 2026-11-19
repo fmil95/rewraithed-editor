@@ -233,6 +233,8 @@ def main(argv=None):
     ap.add_argument("--scale", type=float, default=0.01, help="OBJ scale factor (default 0.01)")
     ap.add_argument("--no-textures", action="store_true", help="OBJ without UVs and texture pages")
     ap.add_argument("--crm", help="the unit's .crm (textures) when reading a --drm file")
+    ap.add_argument("--mods", metavar="MODS_DIR",
+                    help="read units from the port's mods folder where they are there (edited units)")
     ap.add_argument("--json", metavar="PATH", help="write everything as JSON (file, or dir for several units)")
     ap.add_argument("--extract", metavar="DIR", help="also save the raw .drm read from the disc")
     ap.add_argument("--nodes", action="store_true", help="print every BSP node and leaf")
@@ -242,6 +244,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     inputs = []
+    if args.mods:
+        disc.OVERLAY = args.mods
     if args.disc:
         if not args.units:
             ap.error("give at least one unit name with --disc")

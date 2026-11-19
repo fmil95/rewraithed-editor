@@ -162,8 +162,15 @@ def level_path(unit):
     return "\\kain2\\area\\%s\\bin\\%s.drm" % (area, unit)
 
 
+# A mods folder whose files are read in place of the bigfile's (as the port
+# does), for every BigFile that isn't given its own: set by --from-mods, so
+# that an edit starts from the unit as it is now in the game.
+OVERLAY = None
+
+
 class BigFile:
-    def __init__(self, image_path, name="BIGFILE.DAT"):
+    def __init__(self, image_path, name="BIGFILE.DAT", mods=None):
+        self.mods = mods
         self.cd = CdImage(image_path)
         self.lba, self.size = self.cd.find(name)
         num = struct.unpack("<i", self.read(0, 4))[0]
@@ -202,6 +209,12 @@ class BigFile:
         raise FileNotFoundError("%s (hash %08x) not in bigfile" % (path, h & 0xFFFFFFFF))
 
     def read_file(self, path, unit=None):
+        mods = self.mods if self.mods is not None else OVERLAY
+        if mods:
+            p = os.path.join(mods, *path.strip("\\").split("\\"))
+            if os.path.isfile(p):
+                with open(p, "rb") as f:
+                    return f.read()
         pos, length = self.lookup(path, unit)
         return self.read(pos, length)
 

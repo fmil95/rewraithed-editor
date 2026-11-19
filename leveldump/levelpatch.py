@@ -190,7 +190,13 @@ def main(argv=None):
     ap.add_argument("--tint", nargs=3, type=int, metavar=("R", "G", "B"), help="colour the --hill towards this")
     ap.add_argument("-o", "--output", help="output .drm")
     ap.add_argument("--install", metavar="MODS_DIR", help="write to MODS_DIR/kain2/area/<area>/bin/<unit>.drm")
+    ap.add_argument("--from-mods", action="store_true",
+                    help="start from the files already in --install (earlier edits) instead of the disc's")
     args = ap.parse_args(argv)
+    if args.from_mods:
+        if not args.install:
+            ap.error("--from-mods needs --install")
+        disc.OVERLAY = args.install
 
     if args.disc:
         if not args.unit:
@@ -217,6 +223,17 @@ def main(argv=None):
         data, lines, new_types = intros.apply_intros(data, args.intros_obj, scale, tmpl)
         for line in lines:
             print(line)
+        # types a new type loads itself (a hunter's weapon), when its source unit loads them too
+        if new_types and args.disc:
+            src = vrambudget.Source(args.disc)
+            for typ, from_unit in list(new_types.items()):
+                listed = vrambudget.object_names(src.level(from_unit)) if src.level(from_unit) else []
+                for dep in src.object_deps(typ):
+                    if dep in listed and dep not in new_types:
+                        data, added = intros.add_object_type(data, dep)
+                        if added:
+                            new_types[dep] = from_unit
+                            print("%s added to the unit's object list (%s uses it, as in %s)" % (dep, typ, from_unit))
         args.new_object_types = new_types
     if args.extra_objects:
         import intros
