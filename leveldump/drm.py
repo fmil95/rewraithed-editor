@@ -95,6 +95,37 @@ class Drm:
         self.reloc_order = [r + nbytes if r >= at else r for r in self.reloc_order]
         self.reloc = set(self.reloc_order)
 
+    def replace(self, start, end, data, pointers=(), allow_into=()):
+        """Replace body[start:end] with `data` (a multiple of 4 bytes long).
+
+        Relocation entries inside the old range are dropped; `pointers` are the
+        offsets (relative to `start`) of the pointers inside `data`, whose
+        values the caller writes afterwards. Pointers elsewhere whose value is
+        >= `end` move with the data behind the range. A pointer elsewhere that
+        points strictly inside the old range would be left dangling, so it is
+        an error unless its location is listed in `allow_into` (the caller
+        rewrites it).
+        """
+        delta = len(data) - (end - start)
+        if delta % 4 or (end - start) % 4:
+            raise ValueError("replacements must keep 4-byte alignment")
+        allow = set(allow_into)
+        kept = []
+        for r in self.reloc_order:
+            if start <= r < end:
+                continue
+            v = struct.unpack_from("<I", self.body, r)[0]
+            if v >= end:
+                struct.pack_into("<I", self.body, r, v + delta)
+            elif start < v < end and r not in allow:
+                raise ValueError("pointer at 0x%x points into the replaced range (0x%x)" % (r, v))
+            kept.append(r + delta if r >= end else r)
+        self.body[start:end] = data
+        kept += [start + p for p in pointers]
+        self.reloc_order = sorted(kept)
+        self.reloc = set(self.reloc_order)
+        return delta
+
     def to_bytes(self):
         num = len(self.reloc_order)
         table_words = ((num + 512) // 512) * 512

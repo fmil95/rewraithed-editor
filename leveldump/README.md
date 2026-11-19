@@ -46,8 +46,9 @@ Vertex colours are written as `v x y z r g b`; they show up as a colour attribut
 and BSP trees, and rebuilds what depends on vertex positions: face normals
 (appending to the normal list when needed), the morph data's material
 positions, and the spheres, boxes and plane error fields of every BSP leaf and
-node above a changed face. Adding or deleting geometry needs a BSP compiler
-and isn't supported yet.
+node above a changed face. Adding or deleting geometry also needs the vertex
+and face lists to grow or shrink, which isn't supported yet (the BSP compiler
+below is the other half).
 
 ```
 # 1. export (writes under1_material.obj and under1_material.obj.map.json)
@@ -68,6 +69,53 @@ The port loads `mods\kain2\area\under\bin\under1.drm` next to `rewraithed.exe`
 in place of the copy in `BIGFILE.DAT`; delete the file to go back. For quick
 tests: `rewraithed.exe -area under1 -skipmenu -skiplogos -skipcutscene`.
 
+## Recompiling BSP trees (bspbuild.py)
+
+`bspbuild.py` rebuilds every non-empty BSP tree of a level from its faces:
+
+```
+python bspbuild.py --disc <path>/KAIN2.img under1 --install <rewraithed exe folder>/mods
+python bspbuild.py --drm edited.drm -o rebuilt.drm --segments 2000
+```
+
+How it builds a tree (`bsp.py`):
+
+* It splits recursively until a leaf has at most 16 faces (`--leaf-max`).
+  Candidate planes are the planes of a sample of the faces plus axis-aligned
+  planes through the median. The score favours balance first, then few faces
+  crossing the plane.
+* Faces are never cut: a face goes to the side its centroid is on, and the
+  node's error fields record how far each child's geometry crosses the plane.
+  Collision is therefore correct for any choice of plane; the planes only
+  decide how well the tree prunes.
+* Errors are computed with the engine's integer plane test, so they're exact
+  for the stored, quantised plane. Spheres and boxes use the same code as `levelpatch.py`.
+* Nodes and leaves are stored in pre-order, front child first, as in the original data.
+  Each tree's faces are reordered within its own slice of `faceList` so every
+  leaf's faces are contiguous; `morphNormalIdx` is reordered with them. Nothing
+  else in a level points at faces (checked on all 369 units), and the engine
+  only refers to faces by index at run time.
+* The BSP region is replaced as a whole (`Drm.replace`), so trees may need more
+  or fewer nodes than before. Empty trees keep aliasing whatever follows them.
+
+`under1` rebuilt: main tree 242 leaves, depth 8 (original 243 leaves, depth 11).
+All 369 units reachable from `under1` recompile and pass the checks below (segment
+tests on a sample of 25 units: 0 misses); in total 50,938 leaves against the
+original 51,502, maximum depth 11 as in the original data. About 1 s per tree of
+2,500 faces.
+
+Before writing, the result goes through the same checks as `levelpatch.py`, plus a
+segment test. Random segments (falls through surfaces and short moves across them)
+are pushed through a reimplementation of the engine's traversal (`bsp.traverse`:
+plane errors with its 5-unit margin, leaf boxes), and every face a segment really
+crosses must be in a visited leaf. On the original data this gives 0 misses (one
+spectral miss in `city9`, from the original's ±1 spectral boxes). Zeroing the
+error fields of a rebuilt tree gives dozens of misses, so the test does catch
+broken trees.
+
+In the port, a recompiled `under1` with the same scripted input plays identically to
+the original, frame for frame, including Raziel being stopped by a pillar.
+
 ## Files
 
 | file | |
@@ -76,6 +124,8 @@ tests: `rewraithed.exe -area under1 -skipmenu -skiplogos -skipcutscene`.
 | `drm.py` | relocation table (`LOAD_RelocBinaryData` / `RESOLVE_Pointers`), writing back, inserting bytes with pointer fix-up |
 | `edit.py` | layout-preserving geometry edits and the rebuild of normals and BSP bounds |
 | `levelpatch.py` | command line for edits (OBJ or scripted) |
+| `bsp.py` | BSP compiler, tree layout, and the engine's traversal for checking |
+| `bspbuild.py` | command line: recompile a level's trees, check, write |
 | `level.py` | struct layouts: `Level`, `Terrain`, `TVertex`, `TFace`, `Intro`, `StreamUnitPortal`, `MorphVertex`, `BSPTree`, `BSPNode`, `BSPLeaf` |
 | `analyze.py` | BSP walking and the checks of stored bounds against the geometry |
 | `objexport.py` | OBJ writer |

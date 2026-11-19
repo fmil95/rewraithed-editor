@@ -180,9 +180,10 @@ def main(argv=None):
         unit = args.unit
         data = disc.BigFile(args.disc).read_level(unit)
     else:
-        unit = os.path.splitext(os.path.basename(args.drm))[0]
         with open(args.drm, "rb") as f:
             data = f.read()
+        # the level knows its own unit name; the file may be called anything
+        unit = lvl.parse_level(data).worldName or os.path.splitext(os.path.basename(args.drm))[0]
     if not (args.output or args.install):
         ap.error("give -o and/or --install")
 
