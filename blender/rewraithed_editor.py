@@ -272,12 +272,95 @@ def _export_obj(path, objects, context, materials, collection=None):
         lc.hide_viewport = was_hidden
 
 
+def _game_look(material):
+    """Draw a material the way the game does: texture times vertex colour
+    (128 = unchanged, so times 2), unlit, sharp texels, palette colour 0 clear.
+    Only the node setup changes; the material's name, which the tools read, stays."""
+    material.use_nodes = True
+    nt = material.node_tree
+    img = next((n.image for n in nt.nodes if n.type == "TEX_IMAGE" and n.image), None)
+    nt.nodes.clear()
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    out.location = (900, 0)
+    vcol = nt.nodes.new("ShaderNodeVertexColor")      # the mesh's active colour attribute
+    vcol.location = (-300, -250)
+    lit = nt.nodes.new("ShaderNodeMix")
+    lit.data_type = "RGBA"
+    lit.blend_type = "MULTIPLY"
+    lit.inputs[0].default_value = 1.0
+    lit.location = (100, 0)
+    twice = nt.nodes.new("ShaderNodeMix")
+    twice.data_type = "RGBA"
+    twice.blend_type = "MULTIPLY"
+    twice.inputs[0].default_value = 1.0
+    twice.inputs[7].default_value = (2.0, 2.0, 2.0, 1.0)
+    twice.location = (300, 0)
+    emit = nt.nodes.new("ShaderNodeEmission")
+    emit.location = (500, 0)
+    nt.links.new(lit.outputs[2], twice.inputs[6])
+    nt.links.new(twice.outputs[2], emit.inputs["Color"])
+    nt.links.new(vcol.outputs["Color"], lit.inputs[7])
+    if img is not None:
+        tex = nt.nodes.new("ShaderNodeTexImage")
+        tex.image = img
+        tex.interpolation = "Closest"
+        tex.location = (-300, 100)
+        nt.links.new(tex.outputs["Color"], lit.inputs[6])
+        clear = nt.nodes.new("ShaderNodeBsdfTransparent")
+        clear.location = (500, 150)
+        mix = nt.nodes.new("ShaderNodeMixShader")
+        mix.location = (700, 0)
+        nt.links.new(tex.outputs["Alpha"], mix.inputs[0])
+        nt.links.new(clear.outputs[0], mix.inputs[1])
+        nt.links.new(emit.outputs[0], mix.inputs[2])
+        nt.links.new(mix.outputs[0], out.inputs["Surface"])
+        if hasattr(material, "surface_render_method"):
+            material.surface_render_method = "DITHERED"
+        else:
+            material.blend_method = "CLIP"
+    else:
+        lit.inputs[6].default_value = (1.0, 1.0, 1.0, 1.0)
+        nt.links.new(emit.outputs[0], out.inputs["Surface"])
+    material.use_backface_culling = False
+
+
+def _show_textured(context, objects):
+    """Material preview in every 3D view, colours as they are, and the view on the unit."""
+    scene = context.scene
+    try:
+        scene.view_settings.view_transform = "Standard"   # the default (AgX/Filmic) washes colours out
+        scene.view_settings.look = "None"
+    except TypeError:
+        pass
+    screen = context.screen
+    if screen is None:
+        return
+    for area in screen.areas:
+        if area.type != "VIEW_3D":
+            continue
+        space = area.spaces.active
+        space.shading.type = "MATERIAL"
+        space.clip_end = max(space.clip_end, 2000.0)      # a unit is a few hundred metres across
+        region = next((r for r in area.regions if r.type == "WINDOW"), None)
+        if region is not None and objects:
+            for o in context.view_layer.objects:
+                o.select_set(False)
+            for o in objects:
+                if o.visible_get():
+                    o.select_set(True)
+            with context.temp_override(area=area, region=region):
+                bpy.ops.view3d.view_selected()
+            for o in objects:
+                o.select_set(False)
+
+
 def _set_realm(scene, realm):
     unit = scene.rewr_open_unit
     for part, show in (("material", realm == "MATERIAL"), ("spectral", realm == "SPECTRAL")):
         lc = _layer_collection(bpy.context.view_layer, _col_name(unit, part))
         if lc:
             lc.hide_viewport = not show
+            lc.collection.hide_render = not show
 
 
 def _realm_update(self, context):
@@ -314,7 +397,13 @@ def open_unit(context, unit):
     scene["rewr_fp_material"] = _fingerprint(cols["material"].objects)
     scene["rewr_fp_spectral"] = _fingerprint(cols["spectral"].objects)
     _set_realm(scene, scene.rewr_realm)
-    in_mods = os.path.isfile(os.path.join(_mods_dir(), *_level_path(unit).split("\\")))
+    for m in bpy.data.materials:
+        _game_look(m)
+    for o in cols["objects"].objects:
+        o.show_name = True          # "intro_5770_hunter": what each arrow is
+        o.show_in_front = True
+    _show_textured(context, list(cols["material"].objects))
+    in_mods =os.path.isfile(os.path.join(_mods_dir(), *_level_path(unit).split("\\")))
     return True, "Opened %s (%s)" % (unit, "your edited version" if in_mods else "as on the disc")
 
 

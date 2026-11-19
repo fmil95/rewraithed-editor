@@ -34,9 +34,11 @@ You get three collections:
 | `city9 spectral` | the same terrain in the spectral realm |
 | `city9 objects` | enemies, objects and Raziel's start, one small arrow each |
 
-The **Material / Spectral** buttons switch which terrain you see. Use *Material Preview*
-shading (the third sphere at the top right of the 3D view) to see the textures. They
-look grey and washed out because the game tints them with the vertex colours.
+The **Material / Spectral** buttons switch which terrain you see. The unit opens
+textured and lit the way the game draws it (each texture tinted by the vertex colours,
+sharp pixels), with each object arrow labelled. If the textures disappear, switch the
+3D view back to *Material Preview* (the third sphere at the top right). Fly through
+with **Shift+`** (W/A/S/D, mouse to look) or use the numpad keys for views from above.
 
 ### 2. Change things
 
