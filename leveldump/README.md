@@ -117,10 +117,15 @@ NULL pointers are 0 and are not in the table. The body starts with the
 ### Terrain
 
 * `normalList` is packed 3-short triples (6 bytes each, not the 8-byte `Normal`
-  struct): `x` is 13-bit two's complement in the low bits of the first short, and
-  the top 3 bits hold the dominant axis (0 = x, 1 = y, 2 = z). A face's normal is
+  struct): `x` is an unsigned 13-bit value in the low bits of the first short
+  (the engine masks it with `0x1FFF` and never sign-extends), and the top 3 bits
+  hold the dominant axis (0 = x, 1 = y, 2 = z). A face's normal is
   `cross(v1 - v0, v2 - v0)` normalised to 4096; `TFace.normal` is the index, and
-  a negative index means the negated normal (`COLLIDE_GetNormal`).
+  a negative index means the negated normal (`COLLIDE_GetNormal`). So every
+  stored normal has x >= 0 (all 323,188 in the 369 units do), and faces pointing
+  towards -x use a negative index; entry 0 is a (0,0,0) dummy because 0 can't be
+  negated. A writer that stores a normal with negative x breaks collision on
+  that face: the engine reads it as a large positive x and Raziel falls through.
 * `vertexList` holds the material realm positions. `TVertex.rgb15` is the
   material vertex colour (15-bit); `r0,g0,b0` are the same colour at 8 bits.
 * `MorphDiffList` is terminated by `vindex < 0`. For each entry,

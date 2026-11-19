@@ -139,15 +139,21 @@ class LevelEditor:
                 n_unit = tuple(-x for x in n_unit)   # keep the face's original facing
             comp = tuple(int(round(x * 4096)) for x in n_unit)
             axis = max(range(3), key=lambda k: abs(n_unit[k]))
+            # The engine reads x as unsigned (& 0x1FFF), so the pool only holds
+            # normals with x >= 0; the other half is reached by a negative index.
+            sign = 1
+            if comp[0] < 0:
+                comp, sign = (-comp[0], -comp[1], -comp[2]), -1
             key = comp + (axis,)
-            if key in lookup:
-                return lookup[key]
-            neg = (-comp[0], -comp[1], -comp[2], axis)
-            if lookup.get(neg, 0) > 0:
-                return -lookup[neg]
+            if key in lookup and lookup[key] > 0:
+                return sign * lookup[key]
+            if comp[0] == 0:
+                neg = (0, -comp[1], -comp[2], axis)
+                if lookup.get(neg, 0) > 0:
+                    return -sign * lookup[neg]
             pool.append(key)
             lookup[key] = len(pool) - 1
-            return len(pool) - 1
+            return sign * (len(pool) - 1)
 
         has_morph_normals = bool(t.morph_normals)
         for fi in faces:

@@ -14,8 +14,11 @@ from drm import Drm
 SIZEOF_TVERTEX = 0xC
 SIZEOF_TFACE = 0xC
 # Terrain normals are packed 3-short triples (COLLIDE_GetNormal), not the
-# 8-byte Normal struct: x is 13-bit two's complement in the low bits of the
-# first short, the top 3 bits hold the dominant axis (0 = x, 1 = y, 2 = z).
+# 8-byte Normal struct: x is an UNSIGNED 13-bit value in the low bits of the
+# first short (the engine masks with 0x1FFF and never sign-extends), and the
+# top 3 bits hold the dominant axis (0 = x, 1 = y, 2 = z). So every stored
+# normal has x >= 0; a face facing the other way uses the negative index.
+# Index 0 is a (0,0,0) dummy, since it can't be negated.
 SIZEOF_NORMAL = 0x6
 SIZEOF_INTRO = 0x4C
 SIZEOF_PORTAL = 0x5C
@@ -227,14 +230,13 @@ TERRAIN_PTRS = {
 
 
 def decode_normal(sx, y, z):
-    x = sx & 0x1FFF
-    if x & 0x1000:
-        x -= 0x2000
-    return (x, y, z, (sx >> 13) & 7)
+    return (sx & 0x1FFF, y, z, (sx >> 13) & 7)
 
 
 def encode_normal(x, y, z, axis):
-    v = (x & 0x1FFF) | ((axis & 7) << 13)
+    if not 0 <= x <= 0x1FFF:
+        raise ValueError("stored normals need 0 <= x <= 8191, got %d" % x)
+    v = x | ((axis & 7) << 13)
     if v & 0x8000:
         v -= 0x10000
     return (v, y, z)
