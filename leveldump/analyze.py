@@ -112,6 +112,8 @@ def face_coverage(level: Level, stats: List[TreeStats]):
     for st in stats:
         for first, n in st.face_ranges:
             for f in range(first, first + n):
+                if f >= len(owner):
+                    continue          # a leaf of a level whose face list was emptied
                 if owner[f] is not None:
                     overlaps += 1
                 owner[f] = st.tree.index

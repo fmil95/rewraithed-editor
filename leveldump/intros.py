@@ -277,6 +277,24 @@ def add_object_type(data, typ):
     return d.to_bytes(), True
 
 
+def remove_object_type(data, typ):
+    """Take an object type out of Level.objectNameList, so the game stops
+    loading it (and stops spending video memory on it). Refused while an intro
+    of that type is left. Returns (new bytes, whether it was removed)."""
+    L = parse_level(data)
+    left = [it.UniqueID for it in L.terrain.intros if it.name.lower() == typ.lower()]
+    if left:
+        raise SystemExit("%s: intros %s still use it; delete them first (--intros-obj)" % (typ, left))
+    d = Drm(data)
+    names, _ = _object_names(d)
+    low = [n.lower() for n in names]
+    if typ.lower() not in low:
+        return data, False
+    at = d.ptr(0x8C) + 16 * low.index(typ.lower())
+    d.replace(at, at + 16, b"")
+    return d.to_bytes(), True
+
+
 def _insert_object_name(d, typ):
     """Insert a 16-byte name in front of the list's 0xFF end byte. In an empty
     list that byte is where Level.objectNameList points, and an insertion moves

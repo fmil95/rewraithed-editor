@@ -75,7 +75,7 @@ class Drm:
     def pack(self, fmt, off, *values):
         struct.pack_into("<" + fmt, self.body, off, *values)
 
-    def insert(self, at, nbytes, fill=b"\0"):
+    def insert(self, at, nbytes, fill=b"\0", keep=()):
         """Insert `nbytes` (a multiple of 4) at body offset `at`.
 
         Pointers whose value is >= `at` move with the data behind them, and so
@@ -87,15 +87,18 @@ class Drm:
             raise ValueError("insertions must keep 4-byte alignment")
         if nbytes == 0:
             return
+        keep = set(keep)
         for r in self.reloc_order:
             v = struct.unpack_from("<I", self.body, r)[0]
-            if v >= at:
+            # pointers in `keep` stay: inserting into an empty list, its own
+            # pointer equals the next block's start but must stay at the new data
+            if v >= at and not (r in keep and v == at):
                 struct.pack_into("<I", self.body, r, v + nbytes)
         self.body[at:at] = (fill * nbytes)[:nbytes]
         self.reloc_order = [r + nbytes if r >= at else r for r in self.reloc_order]
         self.reloc = set(self.reloc_order)
 
-    def replace(self, start, end, data, pointers=(), allow_into=()):
+    def replace(self, start, end, data, pointers=(), allow_into=(), keep=()):
         """Replace body[start:end] with `data` (a multiple of 4 bytes long).
 
         Relocation entries inside the old range are dropped; `pointers` are the
@@ -110,12 +113,15 @@ class Drm:
         if delta % 4 or (end - start) % 4:
             raise ValueError("replacements must keep 4-byte alignment")
         allow = set(allow_into)
+        keep = set(keep)          # pointers whose value `start` stays (an empty list's own pointer)
         kept = []
         for r in self.reloc_order:
             if start <= r < end:
                 continue
             v = struct.unpack_from("<I", self.body, r)[0]
-            if v >= end:
+            if r in keep and v == start:
+                pass
+            elif v >= end:
                 struct.pack_into("<I", self.body, r, v + delta)
             elif start < v < end and r not in allow:
                 raise ValueError("pointer at 0x%x points into the replaced range (0x%x)" % (r, v))

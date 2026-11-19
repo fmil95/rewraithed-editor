@@ -36,6 +36,7 @@ import analyze  # noqa: E402
 import disc  # noqa: E402
 import edit  # noqa: E402
 import level as lvl  # noqa: E402
+import vrambudget  # noqa: E402
 
 
 def read_obj(path):
@@ -180,6 +181,8 @@ def main(argv=None):
     ap.add_argument("--intros-obj", help="edited <unit>_intros.obj (move, turn, duplicate, delete intros)")
     ap.add_argument("--extra-objects", default="", metavar="TYPE:UNIT,...",
                     help="also load these object types (copied from UNIT), e.g. a hunter's weapon fthrow:city4")
+    ap.add_argument("--remove-objects", default="", metavar="TYPE,...",
+                    help="stop loading these object types (after deleting their intros), e.g. hunter,fthrow")
     ap.add_argument("--intro-templates", default="", metavar="UNITS",
                     help="comma-separated units to copy new intro types from (with --disc), e.g. city9")
     ap.add_argument("--hill", nargs=4, type=float, metavar=("X", "Y", "RADIUS", "HEIGHT"),
@@ -224,6 +227,11 @@ def main(argv=None):
             print("%s %s the unit's object list" % (typ, "added to" if added else "already in"))
             if added:
                 args.new_object_types[typ] = src
+    if args.remove_objects:
+        import intros
+        for typ in args.remove_objects.split(","):
+            data, removed = intros.remove_object_type(data, typ.strip())
+            print("%s %s the unit's object list" % (typ.strip(), "removed from" if removed else "not in"))
 
     if args.material_obj and changes_layout(data, args.material_obj,
                                             args.map or _default_map(args.material_obj, unit, "material")):
@@ -418,6 +426,8 @@ def _write(args, unit, out, crm=None):
                   % ", ".join(new_types))
         else:
             install_object_files(args.disc, new_types, args.install)
+    # the object types of this unit and its neighbours must share video memory
+    vrambudget.check_files(args.disc, args.install, [unit], {unit: out}, unit)
 
 
 def install_object_files(disc_path, new_types, mods_dir):

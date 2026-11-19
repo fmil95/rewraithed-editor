@@ -113,6 +113,7 @@ class TopologyEdit:
         self.watch = watch
         self.new_crm = None
         self.new_neighbour_crms = {}
+        self.new_vert_extra = {}
         self.images = {}
         self.L = parse_level(data)
         t = self.L.terrain
@@ -240,21 +241,31 @@ class TopologyEdit:
         self.report.update({"moved_vertices": 0, "new_vertices": 0, "unidentified_after_delete": 0})
         return self
 
-    def add_faces(self, tree_index, triangles, attr, textoff):
+    def add_faces(self, tree_index, triangles, attr, textoff, colour=None, spectral_colour=None, code=None,
+                  textures=None):
         """Add faces (each three positions) to a tree, with these flags and
         textoff; their vertices are new (positions shared between the
-        triangles become one vertex)."""
+        triangles become one vertex).
+
+        `textoff` may be a TextureFT3 entry (a 9-tuple) instead of an offset,
+        or `textures` a list of entries, one per triangle; they're added to the
+        texture list. `colour` / `spectral_colour` are 8-bit (r, g, b) vertex
+        colours and `code` the TVertex code byte for the new vertices (else
+        taken from the nearest original vertex)."""
         t = self.t
         index = {}
-        for tri in triangles:
+        for k, tri in enumerate(triangles):
             ids = []
             for p in tri:
                 p = tuple(int(c) for c in p)
                 if p not in index:
                     index[p] = t.numVertices + len(self.new_verts)
-                    self.new_verts.append((tree_index, p, None))
+                    col = tuple(c / 255.0 for c in colour) if colour else None
+                    self.new_verts.append((tree_index, p, col))
+                    self.new_vert_extra[index[p]] = (spectral_colour, code)
                 ids.append(index[p])
-            self.tree_faces[tree_index].append((tuple(ids), None, None, (attr, textoff)))
+            tex = textures[k] if textures is not None else textoff
+            self.tree_faces[tree_index].append((tuple(ids), None, None, (attr, tex)))
         self.report["new_vertices"] = len(self.new_verts)
 
     def _match(self, local, orig_ids):
@@ -374,6 +385,18 @@ class TopologyEdit:
                             if n is not None:
                                 mn = pool.index(n, mn)
                     reused += 1
+                elif override is not None:
+                    # a face made in code (add_faces): its own flags and texture
+                    fake = type("F", (), {"v0": tri[0], "v1": tri[1], "v2": tri[2]})
+                    n = _face_normal(mat, fake)
+                    nidx = pool.index(n) if n is not None else 1
+                    mn = None
+                    if t.morph_normals is not None:
+                        ns = _face_normal(spec, fake)
+                        mn = pool.index(ns) if ns is not None else nidx
+                    f = type("F", (), {"attr": override[0], "textoff": 0xFFFF})
+                    rec = [tri[0], tri[1], tri[2], override[0], 0, nidx, 0xFFFF]
+                    inherited += 1
                 else:
                     cen = tuple(sum(mat[v][k] for v in tri) / 3.0 for k in range(3))
                     fi = donor(ti, tri, cen)
@@ -388,8 +411,10 @@ class TopologyEdit:
                     rec = [tri[0], tri[1], tri[2], f.attr, f.sortPush, nidx, f.textoff]
                     inherited += 1
                 if override is not None:
-                    # e.g. a portal's trigger face: its own flags and signal offset
-                    rec[3], rec[6] = override
+                    # e.g. a portal's trigger face: its own flags and signal
+                    # offset, or a TextureFT3 entry to add
+                    rec[3] = override[0]
+                    rec[6] = texpool.add(override[1]) if isinstance(override[1], tuple) else override[1]
                 else:
                     rec[6] = texpool.textoff(rec, mname, uv, f)
                 new_faces.append(rec)
@@ -424,23 +449,33 @@ class TopologyEdit:
         if self.new_verts:
             recs = bytearray()
             spectral_cols = []
-            for ti, p, col in self.new_verts:
-                near = t.vertices[nearest(ti, p)]
+            for k, (ti, p, col) in enumerate(self.new_verts):
+                scol, code = self.new_vert_extra.get(nv_old + k, (None, None))
+                nidx = nearest(ti, p) if nv_old else None
+                near = t.vertices[nidx] if nidx is not None else None
                 if col is not None:
                     r, g, b = (int(round(c * 255)) for c in col)
-                else:
+                elif near is not None:
                     r, g, b = near.r0, near.g0, near.b0
+                else:
+                    r, g, b = 128, 128, 128
+                if code is None:
+                    code = near.code if near is not None else 0
                 recs += struct.pack("<hhhHBBBB", p[0], p[1], p[2], _rgb15(r, g, b), r & 0xF8, g & 0xF8,
-                                    b & 0xF8, near.code)
-                nidx = nearest(ti, p)
-                spectral_cols.append(t.morph_colors[nidx] if t.morph_colors else _rgb15(r, g, b))
-            d.insert(vl + nv_old * SIZEOF_TVERTEX, len(recs))
+                                    b & 0xF8, code)
+                if scol is not None:
+                    spectral_cols.append(_rgb15(*scol))
+                elif nidx is not None and t.morph_colors:
+                    spectral_cols.append(t.morph_colors[nidx])
+                else:
+                    spectral_cols.append(_rgb15(r, g, b))
+            d.insert(vl + nv_old * SIZEOF_TVERTEX, len(recs), keep=[terrain() + 0x1C] if nv_old == 0 else ())
             vl = tptr(0x1C)
             d.body[vl + nv_old * SIZEOF_TVERTEX: vl + nv_new * SIZEOF_TVERTEX] = recs
             mcl = tptr(0x40)
             if mcl is not None:
                 extra = struct.pack("<%dH" % len(spectral_cols), *spectral_cols)
-                d.insert(mcl + nv_old * 2, (len(extra) + 3) & ~3)
+                d.insert(mcl + nv_old * 2, (len(extra) + 3) & ~3, keep=[terrain() + 0x40] if nv_old == 0 else ())
                 mcl = tptr(0x40)
                 d.body[mcl + nv_old * 2: mcl + nv_old * 2 + len(extra)] = extra
         d.pack("i", terrain() + 0x10, nv_new)
@@ -451,7 +486,8 @@ class TopologyEdit:
         fl = tptr(0x20)
         fbytes = b"".join(struct.pack("<HHHBbhH", *r) for r in new_faces)
         leaf_ptrs = self._leaf_pointer_locations(d)
-        d.replace(fl, fl + nf_old * SIZEOF_TFACE, fbytes, allow_into=leaf_ptrs)
+        d.replace(fl, fl + nf_old * SIZEOF_TFACE, fbytes, allow_into=leaf_ptrs,
+                  keep=[terrain() + 0x20] if nf_old == 0 else ())
         mni = tptr(0x4C)
         if mni is not None:
             old_len = nf_old * 2
@@ -462,7 +498,7 @@ class TopologyEdit:
             mbytes = struct.pack("<%dH" % len(vals), *vals) + b"\0" * (new_len - 2 * len(vals))
             # morphNormalIdx may start or end on a half word: replace whole words
             if old_len % 4 == 0 and mni % 4 == 0:
-                d.replace(mni, mni + old_len, mbytes)
+                d.replace(mni, mni + old_len, mbytes, keep=[terrain() + 0x4C] if old_len == 0 else ())
             else:
                 self._replace_unaligned(d, mni, old_len, mbytes, allow=[terrain() + 0x4C])
         d.pack("i", terrain() + 0x14, len(new_faces))
@@ -594,6 +630,15 @@ class TexturePool:
         if off > 0xFFF0:
             raise SystemExit("too many texture entries")
         return off
+
+    def add(self, entry):
+        """Byte offset of a TextureFT3 entry, appended if it's new."""
+        entry = tuple(entry)
+        if entry not in self.lookup:
+            self.entries.append(entry)
+            self.lookup[entry] = len(self.entries) - 1
+        self.changed += 1
+        return self.lookup[entry] * 12
 
     def write(self, d):
         added = len(self.entries) - self.orig_count

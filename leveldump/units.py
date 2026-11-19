@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import disc  # noqa: E402
 from drm import Drm  # noqa: E402
 from level import SIZEOF_PORTAL, parse_level  # noqa: E402
+import vrambudget  # noqa: E402
 
 SIGNAL_END = 15
 SIGNAL_STREAM = 18
@@ -273,9 +274,11 @@ def tint(data, rgb):
     return d.to_bytes()
 
 
-def cut_opening(data, tree, box):
+def cut_opening(data, tree, box, inside=False):
     """Delete faces of `tree` that reach into `box` and aren't floor (faces
-    whose normal points mostly up are kept), then rebuild the BSP trees."""
+    whose normal points mostly up are kept), then rebuild the BSP trees.
+    With `inside`, only faces lying entirely within the box go (a doorway cut
+    along existing edges, leaving the faces next to it alone)."""
     import geometry
     import analyze
     from edit import _face_normal
@@ -288,11 +291,14 @@ def cut_opening(data, tree, box):
         pts = [pos[v] for v in tri]
         lo = [min(p[k] for p in pts) for k in range(3)]
         hi = [max(p[k] for p in pts) for k in range(3)]
-        inside = lo[0] <= x1 and hi[0] >= x0 and lo[1] <= y1 and hi[1] >= y0 and lo[2] <= z1 and hi[2] >= z0
+        if inside:
+            hit = lo[0] >= x0 and hi[0] <= x1 and lo[1] >= y0 and hi[1] <= y1 and lo[2] >= z0 and hi[2] <= z1
+        else:
+            hit = lo[0] <= x1 and hi[0] >= x0 and lo[1] <= y1 and hi[1] >= y0 and lo[2] <= z1 and hi[2] >= z0
         fake = type("F", (), {"v0": tri[0], "v1": tri[1], "v2": tri[2]})
         n = _face_normal(pos, fake)
         floor = n is not None and n[2] > 0.7
-        if inside and not floor:
+        if hit and not floor:
             removed += 1
         else:
             kept.append(entry)
@@ -381,11 +387,15 @@ def main(argv=None):
     bf = disc.BigFile(args.disc)
     out_root = args.install or args.output_dir
 
+    written = {}       # unit -> level bytes, for the video-memory check
+
     def write(path, blob):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
             f.write(blob)
         print("wrote", path)
+        if path.lower().endswith(".drm"):
+            written[os.path.splitext(os.path.basename(path))[0].lower()] = blob
 
     if args.cmd == "new":
         check_new_name(bf, args.name)
@@ -465,6 +475,8 @@ def main(argv=None):
         print(msg)
         walk_signals(parse_level(data).drm)        # must walk like the engine walks it
         write(unit_path(args.unit, "drm", out_root), data)
+    if written:
+        vrambudget.check_files(args.disc, args.install, list(written), written)
     return 0
 
 

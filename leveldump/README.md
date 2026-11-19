@@ -341,6 +341,80 @@ units.py ... add-portal under1 under6 2 --like under1:0 --rotate 180 --at -4900 
 units.py ... retarget under6 under1 under1 --number 3
 ```
 
+### A unit built from nothing (newunit.py)
+
+```
+python newunit.py --disc <path>/KAIN2.img rewr1 --connect city9 --wall-y 0 \
+    --door 10273 -646 10909 1267 --install <exe folder>/mods
+```
+
+makes a unit with its own name (here `rewr1`, area `rewr`, a stream ID no other
+unit has) and generated content, connected to `city9` through a doorway cut into
+one of its south-facing walls. No other unit changes:
+
+* **Container:** the level-file structure (Level and Terrain headers, light
+  list, fog, signal list, one portal record) comes from an existing unit's file
+  (`--container`, default `city19`) with all of its content removed (vertices,
+  faces, morph data, intros, animated objects and textures, event scripts, its
+  other portals). The container's own unit keeps its files and is not touched.
+* **Room:** a box (floor, ceiling, four walls, about 4000 x 5000 x 3000, tiled
+  every 1000 units) facing inwards behind the doorway, textured with the
+  connected unit's most used floor and wall textures. Its `.crm` is a copy of the
+  connected unit's, so both units' textures agree with the video memory either
+  one loads. A Raziel start inside, and BSP trees compiled.
+* **Connection:** in the connected unit, the wall faces lying entirely inside
+  the doorway are removed (`cut-opening ... inside`: pick a doorway along the
+  wall's existing edges so the faces around it stay whole) and a portal to the
+  new unit is added; the new unit's portal leads back to it. Both units use the
+  same coordinates, so the game lines them up with no offset.
+
+Choose a doorway where the wall has nothing behind it and doesn't change shape in
+the spectral realm (vertices without morph entries), else the hole and the
+doorway stop lining up there.
+
+Tested: `rewr1`, a brick room behind `city9`'s north wall at x 10273..10909,
+reached through the new doorway and loading on its own with `-area rewr1`.
+
+### Object video memory (vrambudget.py)
+
+Each object type gets one block of video memory for its textures, the size in
+its `Object.vramSize` (Raziel 64x256, a hunter 40x256, an aluka 44x256 halfwords).
+Every type gets a block, not every instance. All the blocks share the object
+area, x 512..1023 and y 256..511 (512 columns of 256 lines), with the font and
+the objects the engine keeps loaded everywhere (Raziel, glyph icons, particles,
+soul and health effects: about 140 columns). The game keeps the types of the
+current unit *and of every unit its portals lead to* loaded together. When a block
+doesn't fit even after the game compacts the area, the object is used without
+one, and its textures show whatever else is in video memory.
+
+So adding enemies to one unit can scramble them in a neighbour. Enemies added to
+`city9` take room in `city19`'s group, which also loads `city20`. `levelpatch.py`,
+`units.py` and `newunit.py` print the budget of every group an edit touches after
+writing, and warn when one is over:
+
+```
+object video memory (city20):
+  city20    46% of the object area (238 of 512 columns), room for 16 more 16-wide objects
+  city19    86% of the object area (439 of 512 columns): OVER, no room for aluka (44x256)
+```
+
+A type can bring others with it: a hunter loads `xbow` and `fthrow`, which are
+counted as well. A block can't cross a 64-column texture page, so a group can be
+over before it reaches 512 columns. Fewer distinct types near each other is what
+helps; more instances of a type already there cost nothing.
+
+```
+# a unit's group and the groups of its neighbours, with every type listed
+python vrambudget.py --disc <path>/KAIN2.img --install <exe folder>/mods -v city19
+# the original game's groups, largest first (all of them fit; oracle5 is full)
+python vrambudget.py --disc <path>/KAIN2.img --survey under1 city9
+```
+
+The simulation is a port of the game's allocator (`VRAM.c`). It doesn't know
+about objects spawned during play, or about types still loaded from a unit you
+just left. Start the port with `-vramlog` to see the real placements in `vram.log`
+next to the executable, including any type that got no block.
+
 ## Recompiling BSP trees (bspbuild.py)
 
 `bspbuild.py` rebuilds every non-empty BSP tree of a level from its faces:
@@ -399,8 +473,10 @@ the original, frame for frame, including Raziel being stopped by a pillar.
 | `textures.py` | `.crm` in video memory, `TextureFT3` entries, texture page images |
 | `newtex.py` | new images: PNG reading, 16-colour reduction, placing into the `.crm` |
 | `vramspace.py` | which parts of a unit's video memory are used, and free spots |
+| `vrambudget.py` | object video memory: whether every object type near a unit gets its textures |
 | `transform.py` | turning a whole unit by 90, 180 or 270 degrees |
 | `portals.py` | moving, reshaping and adding portals |
+| `newunit.py` | a unit built from nothing: emptied container, generated room, doorway into an existing unit |
 | `units.py` | portals (retarget, disable) and new units |
 | `intros.py` | intros as Blender arrows, and moving, adding and deleting them |
 | `geometry.py` | edits that add or delete vertices and faces (used by `levelpatch.py`) |
