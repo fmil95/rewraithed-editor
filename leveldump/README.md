@@ -114,9 +114,40 @@ their UVs within that 256x256 page (export with UVs and materials on). Then:
 * material `untextured` removes a face's texture; a face without UVs keeps its
   texture (new faces: a neighbour's).
 
-UVs are rounded to whole texels (u = U * 256, v = (1 - V) * 256, 0..255). Only
-textures already in the unit's `.crm` can be used; painting new texture
-images into the `.crm` isn't supported yet.
+UVs are rounded to whole texels (u = U * 256, v = (1 - V) * 256, 0..255).
+
+**New images.** Give faces an ordinary Blender material with an image texture
+(an 8-bit PNG) and UV-map them over the image (0..1). Export with materials and
+UVs and "Path Mode: Absolute" (or keep the image next to the .mtl). On import
+(`newtex.py`, `vramspace.py`):
+
+* the image is shrunk if needed (at most 128 texels, keeping its aspect) to
+  fit a free rectangle of the unit's video-memory block inside one texture page,
+  reduced to 16 colours (median cut on its distinct colours; exact when it has 16
+  or fewer), and written as a 4-bit texture with its palette in a free palette slot;
+* transparent pixels (alpha < 128) become colour 0, which the PlayStation doesn't draw;
+* the faces' UVs are mapped into the placed rectangle (UVs outside 0..1 are
+  clamped: terrain textures can't repeat);
+* the patched `.crm` is written next to the `.drm` (with `--install`, into the
+  mods folder, where the port loads it too). For a `--drm` input pass `--crm`.
+
+Video memory is reloaded from a unit's `.crm` whenever Raziel enters that unit
+(`STREAM_MoveIntoNewStreamUnit` -> `LoadLevels` -> `STREAM_LoadMainVram`), and the
+neighbouring units seen through portals are drawn from that same memory. That's
+why neighbouring `.crm` files agree on each other's texels (869 of 871 portal
+links), while units further apart don't. So "free" means not touched by any
+texture entry, palette or animated texture of the unit, of its portal neighbours
+or of *their* neighbours, and the image is written into the unit's and each
+neighbour's `.crm` (all installed into the mods folder; this needs `--disc`). In
+`under1` that leaves room for about 56x54 texels. The game multiplies every texel by the
+vertex colour (128 = unchanged), so a new image picks up the area's lighting:
+in `under1`'s teal cave, white turns cyan. Paint the vertex colours grey
+(128, 128, 128) in Blender to see it as drawn (material realm; spectral colours
+come from the spectral data).
+
+Tested in `under1`: a generated 128x128 picture (rings and a checker) on the
+platform top, shown in the port. (A first version only checked `under1` itself
+and overwrote textures of `under2`'s walls.)
 
 How the textures are stored: a unit's `.crm` is a 36-byte header and raw 16-bit
 video memory, uploaded to (`Level.vramSize.x` + 512, `vramSize.y`), `w` x `h`
@@ -157,11 +188,22 @@ directory of each unit that uses the type, not in a shared place. A type copied
 from another unit is missing from this unit's directory, and the game stops with
 "file does not exist", so `--install` also copies the type's files from the
 template unit into the mods folder and appends the type to `Level.objectNameList`.
-Intros copied from another unit lose their data block (it lives in the other
-file), so types that need one (enemies have it) may not work that way yet.
+An intro copied from another unit brings a copy of its data block, appended
+to the level. Data blocks are lists of commands, `{short command, short count,
+long parameter[count]}` ending with command 0 (`MON_ProcessIntro` in
+`MONLIB.c`); all 724 in the game parse that way and none contains a pointer.
+Commands that name things in the source unit are adjusted:
+
+* 10 (patrol markers), 12 (ambush marker), 13 (flee marker) are dropped: they
+  are planning-marker IDs, looked up in the monster's current unit;
+* 15 (soul link, the UniqueID of the soul intro) is dropped; without it the game
+  creates the soul when the monster dies;
+* 14 (the stream units the monster may be in) becomes the destination unit;
+* the rest (behaviours, hit points, ranges, age, the spectral flag, respawn) is kept.
 
 Tested in `under1`: Raziel's start marker moved onto a new platform (he spawns on
-it), and an urn (`urnx`) copied from `city9`.
+it), an urn (`urnx`) copied from `city9`, and a sluagh (spectral-realm enemy) copied
+from `city9` with its data block.
 
 ## Recompiling BSP trees (bspbuild.py)
 
@@ -219,6 +261,8 @@ the original, frame for frame, including Raziel being stopped by a pillar.
 | `edit.py` | layout-preserving geometry edits and the rebuild of normals and BSP bounds |
 | `levelpatch.py` | command line for edits (OBJ or scripted) |
 | `textures.py` | `.crm` in video memory, `TextureFT3` entries, texture page images |
+| `newtex.py` | new images: PNG reading, 16-colour reduction, placing into the `.crm` |
+| `vramspace.py` | which parts of a unit's video memory are used, and free spots |
 | `intros.py` | intros as Blender arrows, and moving, adding and deleting them |
 | `geometry.py` | edits that add or delete vertices and faces (used by `levelpatch.py`) |
 | `bsp.py` | BSP compiler, tree layout, and the engine's traversal for checking |

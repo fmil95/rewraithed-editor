@@ -19,8 +19,9 @@ Import (`apply_intros`), on the full intros OBJ:
 * an arrow named after an UniqueID or type the level doesn't have, e.g.
   "intro_new_urnx", becomes a new intro of that type, copied from an intro of
   that type in this level, else from one in the template units; a type the
-  unit doesn't load yet is appended to Level.objectNameList. Templates from
-  another unit lose their data block (it lives in the other file).
+  unit doesn't load yet is appended to Level.objectNameList. A template from
+  another unit brings a copy of its data block (copy_intro_data), with the
+  commands that name things of the source unit adjusted.
 
 Nothing else in a level points into the intro list (checked on all units:
 only Level.introList and Terrain.introList, which are the same pointer, and
@@ -174,7 +175,14 @@ def apply_intros(data, obj_path, scale=0.01, template_levels=()):
             rec = bytearray(tl.drm.body[tit.offset: tit.offset + SIZEOF_INTRO])
             ptrs = {0x30: None, 0x34: None, 0x38: None, 0x3C: None}
             if tit.has_data:
-                report.append("new %s copied from %s without its data block" % (typ, tl.worldName))
+                block, dropped = copy_intro_data(tl.drm, tl.drm.ptr(tit.offset + 0x30), L.streamUnitID)
+                # appended at the end of the body; the intro-list replacement
+                # below moves it (and this pointer) along with everything behind
+                d.body += b"\0" * (-len(d.body) % 4)
+                ptrs[0x30] = len(d.body)
+                d.body += block
+                report.append("new %s copied from %s with its data block (%d bytes%s)" % (
+                    typ, tl.worldName, len(block), "; dropped " + ", ".join(dropped) if dropped else ""))
             tl_names, _ = _object_names(tl.drm)
             if typ not in names_loaded and typ not in add_types and typ in tl_names:
                 add_types.append(typ)
@@ -223,6 +231,42 @@ def apply_intros(data, obj_path, scale=0.01, template_levels=()):
     report.insert(0, "intros: %d -> %d (%d moved, %d turned, %d added, %d deleted)" % (
         old_n, len(records), moved, turned, added, len(deleted)))
     return d.to_bytes(), report, add_sources
+
+
+# Intro data blocks are INICommand lists: {short command, short numParameters,
+# long parameter[numParameters]}..., ending with command 0 (INSTANCE.c,
+# MONLIB.c MON_ProcessIntro). All 724 in the game parse that way and none holds a
+# pointer. These monster commands name things of the unit the block comes from:
+UNIT_SPECIFIC = {
+    10: "patrol markers",      # planning-marker IDs, looked up in the monster's own unit
+    12: "ambush marker",
+    13: "flee marker",
+    15: "soul link",           # UniqueID of the soul intro; 0 lets the game create one
+}
+VALID_UNITS = 14               # stream units the monster may be in
+
+
+def copy_intro_data(src, off, dest_unit_id):
+    """Copy of the command list at body offset `off` of `src` for another unit:
+    unit-specific commands dropped, the valid-units list set to the new unit.
+    Returns (bytes, [names of dropped commands])."""
+    out = bytearray()
+    dropped = []
+    p = off
+    while True:
+        cmd, n = src.unpack("hh", p)
+        params = list(src.unpack("%di" % n, p + 4)) if n > 0 else []
+        p += 4 + 4 * max(n, 0)
+        if cmd == 0:
+            break
+        if cmd in UNIT_SPECIFIC:
+            dropped.append(UNIT_SPECIFIC[cmd])
+            continue
+        if cmd == VALID_UNITS:
+            params = [dest_unit_id]
+        out += struct.pack("<hh", cmd, len(params)) + struct.pack("<%di" % len(params), *params)
+    out += struct.pack("<hh", 0, 0)
+    return bytes(out), dropped
 
 
 def _shift_spline(d, multi, delta):

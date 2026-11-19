@@ -104,8 +104,16 @@ TREE_NAME = re.compile(r"^tree(\d+)_")
 
 
 class TopologyEdit:
-    def __init__(self, data):
+    def __init__(self, data, crm=None, neighbours=(), watch=()):
+        """`crm`: the unit's .crm, needed when faces use new images;
+        `neighbours`/`watch`: see newtex.ImagePlacer."""
         self.data = data
+        self.crm = crm
+        self.neighbours = neighbours
+        self.watch = watch
+        self.new_crm = None
+        self.new_neighbour_crms = {}
+        self.images = {}
         self.L = parse_level(data)
         t = self.L.terrain
         self.t = t
@@ -126,6 +134,14 @@ class TopologyEdit:
         scale = vmap["scale"]
         objs = read_obj_full(obj_path)
         t = self.t
+        import os
+        with open(obj_path) as f:
+            for line in f:
+                if line.startswith("mtllib "):
+                    import newtex
+                    mtl = os.path.join(os.path.dirname(os.path.abspath(obj_path)), line[7:].strip())
+                    if os.path.exists(mtl):
+                        self.images.update({k: v for k, v in newtex.read_mtl(mtl).items() if v})
 
         mat = list(self.orig_mat)            # level index -> material position
         colours = {}                         # level index -> 8-bit colour from the OBJ
@@ -293,7 +309,11 @@ class TopologyEdit:
             return min(cands, key=lambda fi: sum((centroid[fi][k] - p[k]) ** 2 for k in range(3)))
 
         pool = NormalPool(t.normals)
-        texpool = TexturePool(self.L)
+        placer = None
+        if self.crm is not None:
+            import newtex
+            placer = newtex.ImagePlacer(self.L, self.crm, self.neighbours, self.watch)
+        texpool = TexturePool(self.L, placer, self.images)
         new_faces = []            # (v0, v1, v2, attr, sortPush, normal, textoff)
         new_morph = []
         membership = {}
@@ -412,7 +432,17 @@ class TopologyEdit:
         self.report.update({"faces": "%d -> %d" % (nf_old, len(new_faces)), "faces_kept": reused,
                             "faces_new": inherited, "vertices": "%d -> %d" % (nv_old, nv_new),
                             "normals_added": added_normals, "texture_entries_added": added_textures,
-                            "faces_retextured": texpool.changed})
+                            "faces_retextured": texpool.changed,
+                            "new_images": len(placer.placed) if placer else 0})
+        if placer is not None and placer.changed:
+            self.new_crm = placer.crm_bytes()
+            self.new_neighbour_crms = {u: placer.crm_bytes(u) for u in placer.others}
+            for path, inf in placer.placed.items():
+                self.warnings.append("image %s: %dx%d -> %dx%d texels at video memory %s, palette %s" % (
+                    path, inf["source"][0], inf["source"][1], inf["w"], inf["h"], inf["vram"], inf["palette"]))
+        if texpool.clamped:
+            self.warnings.append("%d UVs outside 0..1 on new images were clamped (no tiling on terrain)"
+                                 % texpool.clamped)
         return out, info
 
     def _leaf_pointer_locations(self, d):
@@ -451,7 +481,11 @@ class TexturePool:
     reuse an identical entry, else append one (the list grows at
     EndTextureList; textoff is a 16-bit byte offset, so about 5,400 entries max)."""
 
-    def __init__(self, level):
+    def __init__(self, level, placer=None, images=None):
+        """`placer` (newtex.ImagePlacer) and `images` ({material: PNG path}, from
+        the OBJ's .mtl) let faces use new images: a material that isn't a
+        "tex_" page of the level but has an image gets that image placed in the
+        unit's video memory."""
         import textures
         self.entries = textures.texture_entries(level)
         self.orig_count = len(self.entries)
@@ -459,6 +493,9 @@ class TexturePool:
         for i, e in enumerate(self.entries):
             self.lookup.setdefault(e, i)
         self.changed = 0
+        self.placer = placer
+        self.images = images or {}
+        self.clamped = 0
 
     def textoff(self, rec, mname, uv, src_face):
         """Byte offset for face record `rec` (v0, v1, v2, ..., textoff) given the
@@ -470,14 +507,34 @@ class TexturePool:
                 self.changed += 1
             return 0xFFFF
         key = textures.parse_material(mname)
+        image = None
+        if key is None and uv is not None and mname:
+            path = self.images.get(mname) or self.images.get(mname.split(".")[0])
+            if path:
+                if self.placer is None:
+                    raise SystemExit("material %r uses a new image; the unit's .crm is needed (--disc or --crm)"
+                                     % mname)
+                image = self.placer.place(path)
+                key = (image["tpage"], image["clut"])
         if key is None or uv is None:
             return rec[6]
         tpage, clut = key
 
-        def q(x):
-            return max(0, min(255, int(round(x * 256))))
+        if image is None:
+            def q(x):
+                return max(0, min(255, int(round(x * 256))))
 
-        uvq = [(q(uv[v][0]), q(1.0 - uv[v][1])) for v in rec[:3]]
+            uvq = [(q(uv[v][0]), q(1.0 - uv[v][1])) for v in rec[:3]]
+        else:
+            # UV 0..1 spans the placed image; repeating (UVs outside 0..1)
+            # isn't possible on terrain textures, so they're clamped
+            def clamp(x):
+                if x < -0.001 or x > 1.001:
+                    self.clamped += 1
+                return max(0.0, min(1.0, x))
+
+            uvq = [(image["u0"] + int(round(clamp(uv[v][0]) * (image["w"] - 1))),
+                    image["v0"] + int(round((1.0 - clamp(uv[v][1])) * (image["h"] - 1)))) for v in rec[:3]]
         attr = 0
         old = None
         if src_face.textoff != 0xFFFF and src_face.textoff % 12 == 0 and src_face.textoff // 12 < self.orig_count:

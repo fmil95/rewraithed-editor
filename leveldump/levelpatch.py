@@ -167,6 +167,7 @@ def main(argv=None):
     ap.add_argument("--map", help="map for --material-obj (default <obj export>.map.json next to it)")
     ap.add_argument("--spectral-map", help="map for --spectral-obj")
     ap.add_argument("--no-colors", action="store_true", help="ignore vertex colours in the OBJ")
+    ap.add_argument("--crm", help="the unit's .crm, for new texture images when reading a --drm file")
     ap.add_argument("--intros-obj", help="edited <unit>_intros.obj (move, turn, duplicate, delete intros)")
     ap.add_argument("--intro-templates", default="", metavar="UNITS",
                     help="comma-separated units to copy new intro types from (with --disc), e.g. city9")
@@ -314,7 +315,22 @@ def write_topology(args, data, unit):
     import geometry
     import bspbuild
     m = args.map or _default_map(args.material_obj, unit, "material")
-    te = geometry.TopologyEdit(data)
+    crm = None
+    if args.crm:
+        with open(args.crm, "rb") as f:
+            crm = f.read()
+    elif args.disc:
+        crm = disc.BigFile(args.disc).read_file(disc.level_path(unit).replace(".drm", ".crm"), unit)
+    neighbours, watch = (), ()
+    if args.disc and _uses_new_images(args.material_obj):
+        import newtex
+        neighbours, watch = newtex.neighbourhood(disc.BigFile(args.disc), lvl.parse_level(data), unit)
+        print("new images: kept clear of %d neighbouring and %d further units; written into %s too" % (
+            len(neighbours), len(watch), ", ".join(n for n, _, _ in neighbours) or "no other unit"))
+    elif _uses_new_images(args.material_obj):
+        print("warning: without --disc, neighbouring units' .crm files can't be updated, and their "
+              "textures may be overwritten")
+    te = geometry.TopologyEdit(data, crm, neighbours, watch)
     te.apply_obj(args.material_obj, m, use_colors=not args.no_colors)
     out, info = te.build()
     for w in te.warnings[:20]:
@@ -327,11 +343,39 @@ def write_topology(args, data, unit):
     if bad or misses:
         print("not written")
         return 1
-    _write(args, unit, out)
+    _write(args, unit, out, te.new_crm)
+    for n, c in te.new_neighbour_crms.items():
+        _write_crm(args, n, c)
     return 0
 
 
-def _write(args, unit, out):
+def _uses_new_images(obj_path):
+    """True if the OBJ's .mtl has a material with an image that isn't a level page."""
+    import newtex
+    with open(obj_path) as f:
+        for line in f:
+            if line.startswith("mtllib "):
+                mtl = os.path.join(os.path.dirname(os.path.abspath(obj_path)), line[7:].strip())
+                if os.path.exists(mtl):
+                    return any(v and not k.startswith("tex_") for k, v in newtex.read_mtl(mtl).items())
+    return False
+
+
+def _write_crm(args, unit, crm):
+    """A neighbouring unit's patched .crm, next to -o and into --install."""
+    paths = []
+    if args.output:
+        paths.append(os.path.join(os.path.dirname(os.path.abspath(args.output)), unit + ".crm"))
+    if args.install:
+        paths.append(os.path.join(args.install, *disc.level_path(unit).replace(".drm", ".crm").strip("\\").split("\\")))
+    for p in paths:
+        os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(crm)
+        print("wrote", p, "(neighbour's textures)")
+
+
+def _write(args, unit, out, crm=None):
     paths = []
     if args.output:
         paths.append(args.output)
@@ -342,6 +386,11 @@ def _write(args, unit, out):
         with open(p, "wb") as f:
             f.write(out)
         print("wrote", p)
+        if crm is not None:
+            cp = os.path.splitext(p)[0] + ".crm"
+            with open(cp, "wb") as f:
+                f.write(crm)
+            print("wrote", cp, "(textures)")
     new_types = getattr(args, "new_object_types", None) or {}
     if new_types:
         if not args.install:
