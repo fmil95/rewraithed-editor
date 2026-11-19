@@ -347,13 +347,17 @@ def random_segments(level, tree_index, count, seed=7, spectral=False):
 
 # --- rebuilding a level's trees ---------------------------------------------
 
-def rebuild_level(data, leaf_max=LEAF_MAX, trees=None):
+def rebuild_level(data, leaf_max=LEAF_MAX, trees=None, membership=None):
     """Recompile the BSP trees of a level .drm (all non-empty trees, or the
     indices in `trees`) and return (new bytes, stats).
 
     Each tree keeps its faces (faces are only reordered within the tree's own
     slice of faceList, together with morphNormalIdx), its header fields and its
-    place in memory; empty trees stay empty and keep aliasing what follows."""
+    place in memory; empty trees stay empty and keep aliasing what follows.
+
+    `membership` ({tree index: (first face, count)}) gives each tree's faces
+    explicitly, for a level whose face list was rebuilt (geometry.py); the old
+    leaves are then ignored. A tree given 0 faces becomes empty."""
     import struct
     import analyze
     from drm import Drm
@@ -374,10 +378,14 @@ def rebuild_level(data, leaf_max=LEAF_MAX, trees=None):
     built = {}
     stats = []
     for tr in t.trees:
-        if not (tr.nodes or tr.leaves):
-            continue
-        slices = sorted((lf.first_face, lf.numFaces) for lf in tr.leaves if lf.first_face is not None)
-        tree_faces = [f for first, n in slices for f in range(first, first + n)]
+        if membership is not None:
+            first, count = membership.get(tr.index, (0, 0))
+            tree_faces = list(range(first, first + count))
+        else:
+            if not (tr.nodes or tr.leaves):
+                continue
+            slices = sorted((lf.first_face, lf.numFaces) for lf in tr.leaves if lf.first_face is not None)
+            tree_faces = [f for first, n in slices for f in range(first, first + n)]
         if not tree_faces:
             continue
         lo = min(tree_faces)

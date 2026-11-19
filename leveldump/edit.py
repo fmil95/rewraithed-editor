@@ -123,62 +123,26 @@ class LevelEditor:
         faces = {i for i, f in enumerate(t.faces) if f.v0 in moved or f.v1 in moved or f.v2 in moved}
 
         # normals -----------------------------------------------------------
-        pool = list(t.normals)
-        lookup = {}
-        for i, n in enumerate(pool):
-            lookup.setdefault(n, i)
+        pool = NormalPool(t.normals)
         new_normal = {}
         new_morph_normal = {}
-        orig_count = len(pool)
-
-        def normal_index(n_unit, old_index):
-            old = pool[abs(old_index)]
-            sign = -1 if old_index < 0 else 1
-            old_vec = (old[0] * sign, old[1] * sign, old[2] * sign)
-            if sum(n_unit[k] * old_vec[k] for k in range(3)) < 0:
-                n_unit = tuple(-x for x in n_unit)   # keep the face's original facing
-            comp = tuple(int(round(x * 4096)) for x in n_unit)
-            axis = max(range(3), key=lambda k: abs(n_unit[k]))
-            # The engine reads x as unsigned (& 0x1FFF), so the pool only holds
-            # normals with x >= 0; the other half is reached by a negative index.
-            sign = 1
-            if comp[0] < 0:
-                comp, sign = (-comp[0], -comp[1], -comp[2]), -1
-            key = comp + (axis,)
-            if key in lookup and lookup[key] > 0:
-                return sign * lookup[key]
-            if comp[0] == 0:
-                neg = (0, -comp[1], -comp[2], axis)
-                if lookup.get(neg, 0) > 0:
-                    return -sign * lookup[neg]
-            pool.append(key)
-            lookup[key] = len(pool) - 1
-            return sign * (len(pool) - 1)
-
         has_morph_normals = bool(t.morph_normals)
         for fi in faces:
             fc = t.faces[fi]
             n = _face_normal(self.material, fc)
             if n is not None:
-                new_normal[fi] = normal_index(n, signed16(fc.normal))
+                new_normal[fi] = pool.index(n, signed16(fc.normal))
             if has_morph_normals:
                 n = _face_normal(self.spectral, fc)
                 if n is not None:
-                    new_morph_normal[fi] = normal_index(n, signed16(t.morph_normals[fi]))
-        if len(pool) > 32767:
-            raise ValueError("too many normals (%d)" % len(pool))
+                    new_morph_normal[fi] = pool.index(n, signed16(t.morph_normals[fi]))
 
-        added = len(pool) - orig_count
+        added = pool.write(self.drm, t)
         if added:
-            at = t.ptrs["normalList"] + orig_count * SIZEOF_NORMAL
-            self.drm.insert(at, (added * SIZEOF_NORMAL + 3) & ~3)
             # everything behind the normal list moved: parse again for offsets
             self.level = L = _reparse(self.drm)
             t = L.terrain
         d = self.drm
-        d.pack("i", t.offset + 0x18, len(pool))
-        for i in range(orig_count, len(pool)):
-            d.pack("hhh", t.ptrs["normalList"] + i * SIZEOF_NORMAL, *encode_normal(*pool[i]))
 
         # vertices, colours, morph data -----------------------------------
         for v in moved:
@@ -243,6 +207,61 @@ class LevelEditor:
             "recoloured_vertices": len(self.colors),
         }
         return d.to_bytes()
+
+
+class NormalPool:
+    """The terrain normal list, with lookup and appending.
+
+    The engine reads a normal's x as unsigned (& 0x1FFF), so the pool only
+    holds normals with x >= 0; the other half is reached by a negative index.
+    Index 0 is the (0,0,0) dummy and is never handed out."""
+
+    def __init__(self, normals):
+        self.pool = list(normals)
+        self.orig_count = len(self.pool)
+        self.lookup = {}
+        for i, n in enumerate(self.pool):
+            if i > 0:
+                self.lookup.setdefault(n, i)
+
+    def index(self, n_unit, old_index=None):
+        """Index (signed) for unit normal `n_unit`. With `old_index`, the result
+        is flipped if needed to keep the face's original facing."""
+        if old_index is not None:
+            old = self.pool[abs(old_index)]
+            sign = -1 if old_index < 0 else 1
+            old_vec = (old[0] * sign, old[1] * sign, old[2] * sign)
+            if sum(n_unit[k] * old_vec[k] for k in range(3)) < 0:
+                n_unit = tuple(-x for x in n_unit)
+        comp = tuple(int(round(x * 4096)) for x in n_unit)
+        axis = max(range(3), key=lambda k: abs(n_unit[k]))
+        sign = 1
+        if comp[0] < 0:
+            comp, sign = (-comp[0], -comp[1], -comp[2]), -1
+        key = comp + (axis,)
+        if key in self.lookup:
+            return sign * self.lookup[key]
+        if comp[0] == 0:
+            neg = (0, -comp[1], -comp[2], axis)
+            if neg in self.lookup:
+                return -sign * self.lookup[neg]
+        self.pool.append(key)
+        self.lookup[key] = len(self.pool) - 1
+        if len(self.pool) > 32767:
+            raise ValueError("too many normals (%d)" % len(self.pool))
+        return sign * (len(self.pool) - 1)
+
+    def write(self, d, t):
+        """Append the new normals to the level (growing the list) and set the
+        count; returns how many were added. Offsets behind the list move."""
+        added = len(self.pool) - self.orig_count
+        if added:
+            at = t.ptrs["normalList"] + self.orig_count * SIZEOF_NORMAL
+            d.insert(at, (added * SIZEOF_NORMAL + 3) & ~3)
+        d.pack("i", t.offset + 0x18, len(self.pool))
+        for i in range(self.orig_count, len(self.pool)):
+            d.pack("hhh", t.ptrs["normalList"] + i * SIZEOF_NORMAL, *encode_normal(*self.pool[i]))
+        return added
 
 
 def _verts(t, faces):

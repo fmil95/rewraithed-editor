@@ -187,6 +187,12 @@ def main(argv=None):
     if not (args.output or args.install):
         ap.error("give -o and/or --install")
 
+    if args.material_obj and changes_layout(data, args.material_obj,
+                                            args.map or _default_map(args.material_obj, unit, "material")):
+        if args.spectral_obj or args.hill:
+            ap.error("an OBJ that adds or deletes geometry can't be combined with --spectral-obj or --hill")
+        return write_topology(args, data, unit)
+
     ed = edit.LevelEditor(data)
     if args.material_obj:
         m = args.map or _default_map(args.material_obj, unit, "material")
@@ -222,6 +228,69 @@ def main(argv=None):
             f.write(out)
         print("wrote", p)
     return 0
+
+
+def changes_layout(data, obj_path, map_path):
+    """True if the OBJ adds or deletes vertices, faces or objects."""
+    import geometry
+    with open(map_path) as f:
+        vmap = json.load(f)
+    objs = geometry.read_obj_full(obj_path)
+    names = {n for n in objs if not n.startswith("portal")}
+    if names != set(vmap["objects"]):
+        return True
+    L = lvl.parse_level(data)
+    t = L.terrain
+    orig = {}
+    for f in t.faces:
+        tri = geometry._canon((f.v0, f.v1, f.v2))
+        orig[tri] = orig.get(tri, 0) + 1
+    seen = {}
+    for name in names:
+        ids = vmap["objects"][name]["vertices"]
+        if len(objs[name]["v"]) != len(ids):
+            return True
+        for poly in objs[name]["f"]:
+            vs = [ids[i] for i in poly]
+            for j in range(1, len(vs) - 1):
+                tri = geometry._canon((vs[0], vs[j], vs[j + 1]))
+                seen[tri] = seen.get(tri, 0) + 1
+    degenerate = {k: v for k, v in orig.items() if len(set(k)) < 3}
+    return seen != {k: v for k, v in orig.items() if k not in degenerate}
+
+
+def write_topology(args, data, unit):
+    import geometry
+    import bspbuild
+    m = args.map or _default_map(args.material_obj, unit, "material")
+    te = geometry.TopologyEdit(data)
+    te.apply_obj(args.material_obj, m, use_colors=not args.no_colors)
+    out, info = te.build()
+    for w in te.warnings[:20]:
+        print("warning:", w)
+    print("geometry: " + ", ".join("%s=%s" % kv for kv in te.report.items()))
+    for s in info["trees"]:
+        print("tree %(tree)d: %(faces)d faces -> %(nodes)d nodes, %(leaves)d leaves, depth %(max_depth)d" % s)
+    print("size %d -> %d bytes" % (len(data), len(out)))
+    _, bad, misses = bspbuild.check(out, 300, "result")
+    if bad or misses:
+        print("not written")
+        return 1
+    _write(args, unit, out)
+    return 0
+
+
+def _write(args, unit, out):
+    paths = []
+    if args.output:
+        paths.append(args.output)
+    if args.install:
+        paths.append(os.path.join(args.install, *disc.level_path(unit).strip("\\").split("\\")))
+    for p in paths:
+        os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(out)
+        print("wrote", p)
 
 
 def _default_map(obj_path, unit, realm):

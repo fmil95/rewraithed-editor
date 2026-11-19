@@ -46,9 +46,8 @@ Vertex colours are written as `v x y z r g b`; they show up as a colour attribut
 and BSP trees, and rebuilds what depends on vertex positions: face normals
 (appending to the normal list when needed), the morph data's material
 positions, and the spheres, boxes and plane error fields of every BSP leaf and
-node above a changed face. Adding or deleting geometry also needs the vertex
-and face lists to grow or shrink, which isn't supported yet (the BSP compiler
-below is the other half).
+node above a changed face. If the OBJ adds or deletes geometry, see
+"Adding and deleting geometry" below.
 
 ```
 # 1. export (writes under1_material.obj and under1_material.obj.map.json)
@@ -68,6 +67,32 @@ exported by Blender without changes patches back to a byte-identical level.
 The port loads `mods\kain2\area\under\bin\under1.drm` next to `rewraithed.exe`
 in place of the copy in `BIGFILE.DAT`; delete the file to go back. For quick
 tests: `rewraithed.exe -area under1 -skipmenu -skiplogos -skipcutscene`.
+
+### Adding and deleting geometry
+
+When the edited OBJ adds or deletes vertices, faces or objects, `levelpatch.py`
+switches to `geometry.py` automatically, then recompiles every BSP tree:
+
+* Original vertices keep their indices (morph entries and VMObjects, the
+  animated water and colour effects, refer to them by index). Deleted vertices
+  stay in the list unused; new vertices are appended. OBJ vertices are matched
+  by index when an object only gained vertices (Blender appends new ones), or
+  by exact position when some were deleted. A vertex that was moved in an
+  object that also lost vertices can't be identified and becomes a new vertex.
+* A face with the same vertices, in the same order, as an original face keeps that
+  face's record (flags, texture, sort push). A new face copies them from the
+  original face of its tree that shares most vertices with it, so it gets a
+  neighbour's texture, stretched (texture coordinates aren't edited yet).
+* New vertices take their colour from the OBJ, or from the nearest original
+  vertex; they have no spectral morph (same position in both realms) and take
+  the nearest original vertex's spectral colour.
+* OBJ object `tree<N>_...` (and its `_backfaces` twin) holds tree N's faces. A new
+  object goes to tree 0; deleting an object deletes its faces. Portal objects are ignored.
+* Export from Blender with "Triangulated Mesh" on; other polygons are fan-triangulated.
+
+Tested with Blender: extruding 5 floor triangles of `under1` into a platform
+300 units high (7 new vertices, 19 new faces), and deleting the same 5 faces.
+Both pass all checks and load in the port.
 
 ## Recompiling BSP trees (bspbuild.py)
 
@@ -124,6 +149,7 @@ the original, frame for frame, including Raziel being stopped by a pillar.
 | `drm.py` | relocation table (`LOAD_RelocBinaryData` / `RESOLVE_Pointers`), writing back, inserting bytes with pointer fix-up |
 | `edit.py` | layout-preserving geometry edits and the rebuild of normals and BSP bounds |
 | `levelpatch.py` | command line for edits (OBJ or scripted) |
+| `geometry.py` | edits that add or delete vertices and faces (used by `levelpatch.py`) |
 | `bsp.py` | BSP compiler, tree layout, and the engine's traversal for checking |
 | `bspbuild.py` | command line: recompile a level's trees, check, write |
 | `level.py` | struct layouts: `Level`, `Terrain`, `TVertex`, `TFace`, `Intro`, `StreamUnitPortal`, `MorphVertex`, `BSPTree`, `BSPNode`, `BSPLeaf` |
