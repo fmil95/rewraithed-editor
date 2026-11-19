@@ -224,6 +224,39 @@ class TopologyEdit:
         self.report.update({"moved_vertices": len(moved), "new_vertices": len(new_verts),
                             "unidentified_after_delete": moved_lost})
 
+    def from_level(self):
+        """Start from the level as it is (no OBJ), for edits made in code
+        (add_faces); the result goes through the same build()."""
+        t = self.t
+        self.mat = list(self.orig_mat)
+        self.colours = {}
+        self.new_verts = []
+        self.moved = set()
+        self.tree_faces = {tr.index: [] for tr in t.trees}
+        for fi, f in enumerate(t.faces):
+            ti = self.owner[fi]
+            if ti is not None:
+                self.tree_faces[ti].append(((f.v0, f.v1, f.v2), None, None))
+        self.report.update({"moved_vertices": 0, "new_vertices": 0, "unidentified_after_delete": 0})
+        return self
+
+    def add_faces(self, tree_index, triangles, attr, textoff):
+        """Add faces (each three positions) to a tree, with these flags and
+        textoff; their vertices are new (positions shared between the
+        triangles become one vertex)."""
+        t = self.t
+        index = {}
+        for tri in triangles:
+            ids = []
+            for p in tri:
+                p = tuple(int(c) for c in p)
+                if p not in index:
+                    index[p] = t.numVertices + len(self.new_verts)
+                    self.new_verts.append((tree_index, p, None))
+                ids.append(index[p])
+            self.tree_faces[tree_index].append((tuple(ids), None, None, (attr, textoff)))
+        self.report["new_vertices"] = len(self.new_verts)
+
     def _match(self, local, orig_ids):
         """Level vertex index (or None for new) for each OBJ vertex of one object."""
         K, M = len(orig_ids), len(local)
@@ -322,7 +355,9 @@ class TopologyEdit:
         for tr in t.trees:
             ti = tr.index
             first = len(new_faces)
-            for tri, mname, uv in self.tree_faces.get(ti, []):
+            for entry in self.tree_faces.get(ti, []):
+                tri, mname, uv = entry[:3]
+                override = entry[3] if len(entry) > 3 else None
                 key = (ti, _canon(tri))
                 old = orig_by_canon.get(key)
                 if old:
@@ -352,7 +387,11 @@ class TopologyEdit:
                         mn = pool.index(ns) if ns is not None else nidx
                     rec = [tri[0], tri[1], tri[2], f.attr, f.sortPush, nidx, f.textoff]
                     inherited += 1
-                rec[6] = texpool.textoff(rec, mname, uv, f)
+                if override is not None:
+                    # e.g. a portal's trigger face: its own flags and signal offset
+                    rec[3], rec[6] = override
+                else:
+                    rec[6] = texpool.textoff(rec, mname, uv, f)
                 new_faces.append(rec)
                 new_morph.append(mn)
             membership[ti] = (first, len(new_faces) - first)

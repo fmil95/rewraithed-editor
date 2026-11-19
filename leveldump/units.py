@@ -21,6 +21,9 @@ How a portal works (see README "Portals and units"):
     python units.py --disc KAIN2.img new under2 under5 --tint 255 120 120 \\
         --disable-portal under4 --install <exe folder>/mods
     python units.py --disc KAIN2.img retarget under1 under2 under5 --install <exe folder>/mods
+    python units.py --disc KAIN2.img move-portal under1 0 -4000 0 0 --install <exe folder>/mods
+    python units.py --disc KAIN2.img add-portal under1 under6 2 --like under2:0 --at -3000 -2500 0 \
+        --install <exe folder>/mods
 """
 
 import argparse
@@ -79,8 +82,9 @@ def _set_name(d, off, name):
     d.body[off:off + 16] = b + b"\0" * (16 - len(b))
 
 
-def retarget(data, old, new):
-    """Point every portal (record and signal) of a unit that leads to `old` at `new`."""
+def retarget(data, old, new, number=None):
+    """Point every portal (record and signal) of a unit that leads to `old` at
+    `new` (and, with `number`, at that portal number there)."""
     L = parse_level(data)
     d = Drm(data)
     t = L.terrain
@@ -90,7 +94,7 @@ def retarget(data, old, new):
     for i, p in enumerate(t.portals):
         if p.dest_unit.lower() == old.lower():
             o = base + 4 + i * SIZEOF_PORTAL
-            rest = p.tolevelname[len(p.dest_unit):]
+            rest = p.tolevelname[len(p.dest_unit):] if number is None else ",%d" % number
             _set_name(d, o, new + rest)
             d.pack("i", o + 0x14, new_id)
             n += 1
@@ -99,7 +103,8 @@ def retarget(data, old, new):
         for sp in stream_signals(d, msig):
             name = d.cstr(sp + 12, 16)
             if name.split(",")[0].lower() == old.lower():
-                _set_name(d, sp + 12, new + name[len(name.split(",")[0]):])
+                rest = name[len(name.split(",")[0]):] if number is None else ",%d" % number
+                _set_name(d, sp + 12, new + rest)
                 d.pack("i", sp + 8, new_id)
                 s += 1
     return d.to_bytes(), "%d portal records and %d stream signals now lead to %s" % (n, s // 1, new)
@@ -117,13 +122,92 @@ def disable(data, dest):
     for j, r in enumerate(recs):
         d.body[base + 4 + j * SIZEOF_PORTAL: base + 4 + (j + 1) * SIZEOF_PORTAL] = r
     d.pack("i", base, len(keep))
-    emptied = set()
+    targets = set()
     for _, msig in signal_faces(L):
         for sp in stream_signals(d, msig):
             if d.cstr(sp + 12, 16).split(",")[0].lower() == dest.lower():
-                d.pack("i", msig, 0)         # a MultiSignal that does nothing
-                emptied.add(msig)
-    return d.to_bytes(), "removed %d portal record(s) to %s, emptied %d signal(s)" % (removed, dest, len(emptied))
+                targets.add(msig)
+    data = d.to_bytes()
+    # empty them from the last to the first, so earlier offsets stay valid
+    for msig in sorted(targets, reverse=True):
+        data = empty_multisignal(data, msig)
+    return data, "removed %d portal record(s) to %s, emptied %d signal(s)" % (removed, dest, len(targets))
+
+
+def walk_signals(d):
+    """[(start, end)] of the MultiSignals from Level.SignalListStart to
+    SignalListEnd, the way SIGNAL_RelocateSignal walks them (header, numSignals
+    signals, a 4-byte end marker id 15, the next one right after). Raises
+    ValueError where the list doesn't walk."""
+    s, e = d.ptr(0xD0), d.ptr(0xD4)
+    out = []
+    m = s
+    while m < e:
+        n = d.s32(m)
+        p = m + 8
+        for _ in range(n):
+            sid = d.s32(p) & 0x7FFFFFFF
+            if sid >= len(SIGNAL_LENGTH):
+                raise ValueError("unknown signal id %d at 0x%x" % (sid, p))
+            p += 4 + 4 * SIGNAL_LENGTH[sid]
+        if d.s32(p) & 0x7FFFFFFF != SIGNAL_END:
+            raise ValueError("MultiSignal at 0x%x has no end marker after its %d signals" % (m, n))
+        out.append((m, p + 4))
+        m = p + 4
+    if m != e:
+        raise ValueError("the signal list runs past SignalListEnd")
+    return out
+
+
+def empty_multisignal(data, msig):
+    """Make the MultiSignal at `msig` do nothing: shrink it to its header with
+    no signals and the end marker (12 bytes, like the empty ones in the game),
+    then fix the trigger faces whose signal offsets lie behind it. Setting only
+    numSignals to 0 would leave its old signals where the engine expects the
+    next MultiSignal, and SIGNAL_RelocateSignal walks into garbage."""
+    L = parse_level(data)
+    d = Drm(data)
+    t = L.terrain
+    base = t.ptrs["signals"]
+    p = msig + 8
+    while d.s32(p) & 0x7FFFFFFF != SIGNAL_END:        # to its end marker, whatever numSignals says
+        sid = d.s32(p) & 0x7FFFFFFF
+        if sid >= len(SIGNAL_LENGTH):
+            raise SystemExit("can't walk the MultiSignal at 0x%x (signal id %d)" % (msig, sid))
+        p += 4 + 4 * SIGNAL_LENGTH[sid]
+    old_end = p + 4
+    new = struct.pack("<ihhi", 0, d.s16(msig + 4), d.s16(msig + 6), SIGNAL_END)
+    delta = d.replace(msig, old_end, new)
+    if delta:
+        fl = d.ptr(d.ptr(0) + 0x20)
+        for i, f in enumerate(t.faces):
+            if f.attr & 0xC0 and f.textoff != 0xFFFF and base + f.textoff >= old_end:
+                d.pack("H", fl + 12 * i + 0xA, f.textoff + delta)
+    return d.to_bytes()
+
+
+def repair_signals(data):
+    """Fix MultiSignals emptied by an older version of `disable` (numSignals 0
+    but the old signals still in place)."""
+    fixed = 0
+    while True:
+        L = parse_level(data)
+        d = L.drm
+        s, e = d.ptr(0xD0), d.ptr(0xD4)
+        m, bad = s, None
+        while m < e:
+            n = d.s32(m)
+            p = m + 8
+            for _ in range(n):
+                p += 4 + 4 * SIGNAL_LENGTH[d.s32(p) & 0x7FFFFFFF]
+            if d.s32(p) & 0x7FFFFFFF != SIGNAL_END:
+                bad = m
+                break
+            m = p + 4
+        if bad is None:
+            return data, fixed
+        data = empty_multisignal(data, bad)
+        fixed += 1
 
 
 def rename(data, old, new):
@@ -189,6 +273,34 @@ def tint(data, rgb):
     return d.to_bytes()
 
 
+def cut_opening(data, tree, box):
+    """Delete faces of `tree` that reach into `box` and aren't floor (faces
+    whose normal points mostly up are kept), then rebuild the BSP trees."""
+    import geometry
+    import analyze
+    from edit import _face_normal
+    x0, y0, z0, x1, y1, z1 = box
+    te = geometry.TopologyEdit(data).from_level()
+    pos = analyze.material_positions(te.L)
+    kept, removed = [], 0
+    for entry in te.tree_faces[tree]:
+        tri = entry[0]
+        pts = [pos[v] for v in tri]
+        lo = [min(p[k] for p in pts) for k in range(3)]
+        hi = [max(p[k] for p in pts) for k in range(3)]
+        inside = lo[0] <= x1 and hi[0] >= x0 and lo[1] <= y1 and hi[1] >= y0 and lo[2] <= z1 and hi[2] >= z0
+        fake = type("F", (), {"v0": tri[0], "v1": tri[1], "v2": tri[2]})
+        n = _face_normal(pos, fake)
+        floor = n is not None and n[2] > 0.7
+        if inside and not floor:
+            removed += 1
+        else:
+            kept.append(entry)
+    te.tree_faces[tree] = kept
+    out, _ = te.build()
+    return out, "removed %d faces of tree %d inside %s" % (removed, tree, box)
+
+
 def check_new_name(bf, name):
     nid = disc.hash_unit(name)
     if any(sd[0] == nid for sd in bf.subdirs):
@@ -228,11 +340,37 @@ def main(argv=None):
     n.add_argument("--tint", nargs=3, type=int, metavar=("R", "G", "B"), help="tint its vertex colours")
     n.add_argument("--disable-portal", action="append", default=[], metavar="UNIT",
                    help="remove the copy's portal to UNIT (repeatable)")
+    n.add_argument("--rotate", type=int, default=0, choices=(0, 90, 180, 270),
+                   help="turn the copy about the vertical axis (degrees, counter-clockwise)")
     r = sub.add_parser("retarget", help="make a unit's portals to OLD lead to NEW")
     r.add_argument("unit")
     r.add_argument("old")
     r.add_argument("new")
     r.add_argument("--drm", help="the unit's level file (default: mods copy, else the disc)")
+    r.add_argument("--number", type=int, help="also set the portal number on the other side")
+    mp = sub.add_parser("move-portal", help="move a unit's portal (record and trigger faces)")
+    mp.add_argument("unit")
+    mp.add_argument("index", type=int, help="portal index, as leveldump lists them")
+    mp.add_argument("delta", nargs=3, type=int, metavar=("DX", "DY", "DZ"))
+    mp.add_argument("--drm")
+    ad = sub.add_parser("add-portal", help="add a portal to DEST, arriving at DEST's portal DEST_NUM")
+    ad.add_argument("unit")
+    ad.add_argument("dest")
+    ad.add_argument("dest_num", type=int)
+    ad.add_argument("--like", metavar="UNIT:INDEX", help="copy the shape of another unit's portal")
+    ad.add_argument("--at", nargs=3, type=int, metavar=("X", "Y", "Z"), help="put the copied shape's min corner here")
+    ad.add_argument("--quad", nargs=12, type=int, metavar="C", help="corners A B C D (x y z each): t1 = ABC, t2 = ACD")
+    ad.add_argument("--rotate", type=int, default=0, choices=(0, 90, 180, 270),
+                    help="turn the --like shape first (degrees, counter-clockwise)")
+    rp = sub.add_parser("repair-signals", help="fix signals emptied by an older 'disable'")
+    rp.add_argument("unit")
+    rp.add_argument("--drm")
+    co = sub.add_parser("cut-opening", help="delete the walls and ceiling of a tree inside a box")
+    co.add_argument("unit")
+    co.add_argument("box", nargs=6, type=int, metavar="B", help="x0 y0 z0 x1 y1 z1")
+    co.add_argument("--tree", type=int, default=0)
+    co.add_argument("--drm")
+    ad.add_argument("--drm")
     x = sub.add_parser("disable", help="remove a unit's portal to UNIT")
     x.add_argument("unit")
     x.add_argument("dest")
@@ -259,10 +397,15 @@ def main(argv=None):
         for dest in args.disable_portal:
             data, msg = disable(data, dest)
             print(msg)
+        if args.rotate:
+            import transform
+            data, tnotes = transform.rotate(data, args.rotate // 90)
+            for line in tnotes:
+                print(line)
         if args.tint:
             data = tint(data, args.tint)
             print("vertex colours tinted by", tuple(args.tint))
-        parse_level(data)            # sanity
+        walk_signals(parse_level(data).drm)        # sanity: the signal list must walk
         write(unit_path(args.name, "drm", out_root), data)
         for ext in ("crm", "snf", "smf"):
             try:
@@ -286,12 +429,41 @@ def main(argv=None):
     else:
         data, src = _read_input(bf, args.unit, args.install, args.drm)
         print("editing %s (from %s)" % (args.unit, src))
+        import portals
         if args.cmd == "retarget":
-            data, msg = retarget(data, args.old, args.new)
+            data, msg = retarget(data, args.old, args.new, args.number)
+        elif args.cmd == "move-portal":
+            data, msg = portals.move(data, args.index, tuple(args.delta))
+        elif args.cmd == "add-portal":
+            if args.like:
+                u, i = args.like.split(":")
+                other, _ = _read_input(bf, u, args.install)
+                _, _, t1, t2, _ = portals.portal_quads(parse_level(other))[int(i)]
+                if args.rotate:
+                    import transform
+                    t1 = transform.turn_points(t1, args.rotate // 90)
+                    t2 = transform.turn_points(t2, args.rotate // 90)
+                if args.at:
+                    lo = [min(p[k] for p in t1 + t2) for k in range(3)]
+                    t1 = [tuple(p[k] - lo[k] + args.at[k] for k in range(3)) for p in t1]
+                    t2 = [tuple(p[k] - lo[k] + args.at[k] for k in range(3)) for p in t2]
+            elif args.quad:
+                c = [tuple(args.quad[i:i + 3]) for i in range(0, 12, 3)]
+                t1, t2 = [c[0], c[1], c[2]], [c[0], c[2], c[3]]
+            else:
+                ap.error("give --like (with --at) or --quad")
+            data, num = portals.add(data, args.dest, args.dest_num, t1, t2)
+            msg = ("added portal %d -> %s,%d with quad %s %s; %s needs a portal back to %s,%d"
+                   % (num, args.dest, args.dest_num, t1, t2, args.dest, args.unit, num))
+        elif args.cmd == "repair-signals":
+            data, n = repair_signals(data)
+            msg = "repaired %d signal(s)" % n
+        elif args.cmd == "cut-opening":
+            data, msg = cut_opening(data, args.tree, args.box)
         else:
             data, msg = disable(data, args.dest)
         print(msg)
-        parse_level(data)
+        walk_signals(parse_level(data).drm)        # must walk like the engine walks it
         write(unit_path(args.unit, "drm", out_root), data)
     return 0
 

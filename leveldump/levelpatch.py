@@ -140,6 +140,11 @@ def verify(data):
     L = lvl.parse_level(data)
     mat, spec = analyze.material_positions(L), analyze.spectral_positions(L)
     bad = []
+    import units
+    try:
+        units.walk_signals(L.drm)
+    except ValueError as e:
+        bad.append("signal list: %s" % e)
     for tr in L.terrain.trees:
         st = analyze.walk(tr)
         bad += ["tree %d: %s" % (tr.index, p) for p in st.problems]
@@ -169,6 +174,8 @@ def main(argv=None):
     ap.add_argument("--no-colors", action="store_true", help="ignore vertex colours in the OBJ")
     ap.add_argument("--crm", help="the unit's .crm, for new texture images when reading a --drm file")
     ap.add_argument("--intros-obj", help="edited <unit>_intros.obj (move, turn, duplicate, delete intros)")
+    ap.add_argument("--extra-objects", default="", metavar="TYPE:UNIT,...",
+                    help="also load these object types (copied from UNIT), e.g. a hunter's weapon fthrow:city4")
     ap.add_argument("--intro-templates", default="", metavar="UNITS",
                     help="comma-separated units to copy new intro types from (with --disc), e.g. city9")
     ap.add_argument("--hill", nargs=4, type=float, metavar=("X", "Y", "RADIUS", "HEIGHT"),
@@ -204,6 +211,15 @@ def main(argv=None):
         for line in lines:
             print(line)
         args.new_object_types = new_types
+    if args.extra_objects:
+        import intros
+        args.new_object_types = dict(getattr(args, "new_object_types", None) or {})
+        for item in args.extra_objects.split(","):
+            typ, _, src = item.strip().partition(":")
+            data, added = intros.add_object_type(data, typ)
+            print("%s %s the unit's object list" % (typ, "added to" if added else "already in"))
+            if added:
+                args.new_object_types[typ] = src
 
     if args.material_obj and changes_layout(data, args.material_obj,
                                             args.map or _default_map(args.material_obj, unit, "material")):
@@ -407,8 +423,7 @@ def install_object_files(disc_path, new_types, mods_dir):
     bf = disc.BigFile(disc_path)
     for typ, src_unit in new_types.items():
         found = 0
-        for ext in disc.HASH_EXTENSIONS:
-            path = r"\kain2\object\%s\%s.%s" % (typ, typ, ext)
+        for path in [r"\kain2\object\%s\%s.%s" % (typ, typ, e) for e in disc.HASH_EXTENSIONS] +                 [r"\kain2\sfx\object\%s\%s.%s" % (typ, typ, e) for e in disc.HASH_EXTENSIONS]:
             try:
                 blob = bf.read_file(path, src_unit)
             except FileNotFoundError:

@@ -269,6 +269,33 @@ def copy_intro_data(src, off, dest_unit_id):
     return bytes(out), dropped
 
 
+def add_object_type(data, typ):
+    """Append an object type to Level.objectNameList (if missing). Returns
+    (new bytes, whether it was added)."""
+    d = Drm(data)
+    names, term = _object_names(d)
+    if typ in names:
+        return data, False
+    d.insert(term, 16)
+    name = typ.encode("latin-1")[:15]
+    d.body[term: term + 16] = name + b"\0" * (16 - len(name))
+    return d.to_bytes(), True
+
+
+def arrow_obj(name, pos, rot_z, scale=0.01, first=1):
+    """OBJ lines for one intro arrow (as write_intros_obj draws them)."""
+    x, y, z = pos
+    dx, dy = _yaw_dir(rot_z)
+    px, py = -dy, dx
+    pts = [(x, y, z), (x + dx * ARROW, y + dy * ARROW, z),
+           (x + px * ARROW * 0.35, y + py * ARROW * 0.35, z),
+           (x - px * ARROW * 0.35, y - py * ARROW * 0.35, z), (x, y, z + ARROW)]
+    out = ["o %s" % name] + ["v %.4f %.4f %.4f" % (p[0] * scale, p[1] * scale, p[2] * scale) for p in pts]
+    out += ["f %d %d %d" % (first + a, first + b, first + c)
+            for a, b, c in ((0, 1, 2), (0, 3, 1), (2, 1, 4), (1, 3, 4), (3, 2, 4))]
+    return out
+
+
 def _shift_spline(d, multi, delta):
     if multi is None or delta == (0, 0, 0):
         return

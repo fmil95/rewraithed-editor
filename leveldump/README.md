@@ -219,6 +219,16 @@ How a portal works:
   crossing the face fires it (`COLLIDE_LineWithSignals`). A portal's signal is id
   18, "stream level": `currentnum`, `streamID`, `toname[16]`, the same data as the
   record. Signal lists end with id 15; payload lengths are in `signalInfoList`.
+* The MultiSignals between `Level.SignalListStart` and `SignalListEnd` (offsets
+  `0xD0`, `0xD4`) are walked one after the other whenever the level moves in memory
+  (`SIGNAL_RelocateSignal`, from `MEMPACK_RelocateAreaType`): 8-byte header,
+  `numSignals` signals, a 4-byte end marker (id 15), the next one right after.
+  An empty one is 12 bytes. Setting only `numSignals` to 0 leaves the old signals
+  where the next MultiSignal is expected, and the game crashes the next time it
+  tidies memory (e.g. when Raziel enters another unit). `disable` therefore shrinks
+  the MultiSignal and fixes the trigger faces' offsets behind it, every tool checks
+  that the list walks before writing, and `repair-signals UNIT` fixes files made by
+  the first version of `disable`.
 * A unit's stream ID is `LOAD_HashUnit(name)`. Every time Raziel enters a unit, the
   game reloads that unit's level and `.crm` (`LoadLevels`). A unit needs a bigfile
   directory with its ID, else the game stops with "Could not read directory hash".
@@ -248,6 +258,57 @@ python units.py --disc <path>/KAIN2.img --install <exe folder>/mods retarget und
 
 Tested: `under5`, a red-tinted copy of `under2`, reached from `under1` through its
 portal, and loading directly with `-area under5`.
+
+**Moving and adding portals** (`portals.py`). When a neighbour streams in, the game
+moves it so that its portal's box minimum lands on the matching portal's box
+minimum (`STREAM_ConnectStream`: offset = main.min - neighbour.min, then
+`RelocateLevel`). Units are only moved, never turned, so both sides of a
+connection need portals of the same size and orientation; only their positions
+may differ. Moving or adding the portal on one side is enough: the unit on the
+other side follows.
+
+```
+# move under1's portal 0 by (dx, dy, dz): record and trigger faces
+python units.py --disc <path>/KAIN2.img --install <mods> move-portal under1 0 -4000 0 0
+# a second exit from under1 to under6 (arriving at under6's portal 2), shaped like
+# under1's portal 0, with its box minimum at (-2500, -2500, 0)
+python units.py --disc <path>/KAIN2.img --install <mods> add-portal under1 under6 2 \
+    --like under1:0 --at -2500 -2500 0
+# and under6's way back must name that new portal (number 2 in under1)
+python units.py --disc <path>/KAIN2.img --install <mods> retarget under6 under1 under1 --number 2
+```
+
+`add-portal` appends a record to `Terrain.StreamUnits`, a `MultiSignal` with the
+stream signal at `Level.SignalListEnd` (offset `0xD4`), and two trigger faces (attr
+`0x44`, `textoff` = the signal's offset from `Terrain.signals`) to the tree with ID
+-1, then rebuilds the BSP trees. The trigger fires only when crossed from the front
+of its triangles to the back (`COLLIDE_LineWithSignals`), so the quad's corner order
+sets which way Raziel has to walk through it; `--like` keeps the other portal's
+orientation. `--quad` takes four corners A B C D (t1 = ABC, t2 = ACD).
+
+Because units are never turned, a copy can only attach to a wall that faces the
+same way as its source's portal. `new ... --rotate 90|180|270` turns the copy in
+the data instead (`transform.py`): vertices, morph data, intros (position,
+spectral offset, facing) and their position splines, portals, VMObjects; then
+it rebuilds every face normal from the winding and recompiles the BSP trees.
+Cameras, markers, point and spot lights, the light list's directions and
+non-stream signals are not turned (reported when present). `add-portal
+--rotate` turns a `--like` shape the same way.
+
+`cut-opening UNIT x0 y0 z0 x1 y1 z1` deletes the walls and ceiling of a tree
+(default tree 0) that reach into the box, keeping faces whose normal points
+mostly up (the floor), then rebuilds the BSP trees.
+
+Tested: a second exit in `under1`'s west wall (an opening cut with `cut-opening`)
+leading to `under6`, a copy of `under2` turned by 180 degrees and tinted blue,
+while the original east exit still leads to `under5`:
+
+```
+units.py ... new under2 under6 --rotate 180 --tint 110 140 255 --disable-portal under4
+units.py ... cut-opening under1 -5100 -800 30 -4200 1800 1700
+units.py ... add-portal under1 under6 2 --like under1:0 --rotate 180 --at -4900 -600 0
+units.py ... retarget under6 under1 under1 --number 3
+```
 
 ## Recompiling BSP trees (bspbuild.py)
 
@@ -307,6 +368,8 @@ the original, frame for frame, including Raziel being stopped by a pillar.
 | `textures.py` | `.crm` in video memory, `TextureFT3` entries, texture page images |
 | `newtex.py` | new images: PNG reading, 16-colour reduction, placing into the `.crm` |
 | `vramspace.py` | which parts of a unit's video memory are used, and free spots |
+| `transform.py` | turning a whole unit by 90, 180 or 270 degrees |
+| `portals.py` | moving, reshaping and adding portals |
 | `units.py` | portals (retarget, disable) and new units |
 | `intros.py` | intros as Blender arrows, and moving, adding and deleting them |
 | `geometry.py` | edits that add or delete vertices and faces (used by `levelpatch.py`) |
