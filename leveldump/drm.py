@@ -11,8 +11,10 @@ loader adds the body's load address to each such pointer and then moves the
 body down over the table. Words that are not in the table are not pointers:
 a NULL pointer is simply 0 and not listed.
 
-Here the body is kept as bytes and pointers stay body offsets; `ptr()` returns
-None for a field that is not in the relocation table (i.e. NULL).
+Here the body is kept as a bytearray and pointers stay body offsets; `ptr()`
+returns None for a field that is not in the relocation table (i.e. NULL).
+`to_bytes()` writes the file back; `insert()` grows the body and fixes every
+pointer and relocation entry behind the insertion point.
 """
 
 import struct
@@ -26,14 +28,17 @@ class Drm:
         self.num_pointers = num
         self.table_words = ((num + 512) // 512) * 512
         self.header_size = self.table_words * 4
-        self.reloc = set(struct.unpack_from("<%di" % num, data, 4))
-        self.body = bytes(data[self.header_size:])
+        self.reloc_order = list(struct.unpack_from("<%di" % num, data, 4))
+        self.reloc = set(self.reloc_order)
+        self.body = bytearray(data[self.header_size:])
         bad = [r for r in self.reloc if r < 0 or r + 4 > len(self.body) or r & 3]
         if bad:
             raise ValueError("relocation entries outside body: %r" % bad[:5])
 
     def __len__(self):
         return len(self.body)
+
+    # --- reading ------------------------------------------------------------
 
     def is_ptr(self, off):
         return off in self.reloc
@@ -64,3 +69,36 @@ class Drm:
         if end < 0:
             end = off + maxlen
         return self.body[off:end].decode("latin-1")
+
+    # --- writing ------------------------------------------------------------
+
+    def pack(self, fmt, off, *values):
+        struct.pack_into("<" + fmt, self.body, off, *values)
+
+    def insert(self, at, nbytes, fill=b"\0"):
+        """Insert `nbytes` (a multiple of 4) at body offset `at`.
+
+        Pointers whose value is >= `at` move with the data behind them, and so
+        do relocation entries stored at or behind `at`. Anything that refers to
+        body offsets without being in the relocation table is not adjusted, so
+        insert only at the end of a block.
+        """
+        if nbytes % 4:
+            raise ValueError("insertions must keep 4-byte alignment")
+        if nbytes == 0:
+            return
+        for r in self.reloc_order:
+            v = struct.unpack_from("<I", self.body, r)[0]
+            if v >= at:
+                struct.pack_into("<I", self.body, r, v + nbytes)
+        self.body[at:at] = (fill * nbytes)[:nbytes]
+        self.reloc_order = [r + nbytes if r >= at else r for r in self.reloc_order]
+        self.reloc = set(self.reloc_order)
+
+    def to_bytes(self):
+        num = len(self.reloc_order)
+        table_words = ((num + 512) // 512) * 512
+        head = bytearray(table_words * 4)
+        struct.pack_into("<i", head, 0, num)
+        struct.pack_into("<%di" % num, head, 4, *self.reloc_order)
+        return bytes(head) + bytes(self.body)

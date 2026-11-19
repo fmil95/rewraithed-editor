@@ -8,8 +8,12 @@ extension that Blender imports as a colour attribute.
 The game is Z-up like Blender, so axes are written as-is; positions are
 multiplied by `scale` (a unit spans thousands to tens of thousands of game units).
 Faces not referenced by any BSP leaf go into an "unowned" object.
+
+Next to each OBJ, `<file>.obj.map.json` lists the level vertex behind every OBJ
+vertex of every object; levelpatch.py uses it to read an edited OBJ back.
 """
 
+import json
 import os
 
 import analyze
@@ -40,6 +44,7 @@ def write_obj(path, level, realm, scale=0.01, owner=None, portals=True):
         stats = [analyze.walk(tr) for tr in t.trees]
         owner, _ = analyze.face_coverage(level, stats)
 
+    vmap = {"unit": level.worldName, "realm": realm, "scale": scale, "objects": {}}
     groups = {}
     for fi, tree_index in enumerate(owner):
         groups.setdefault(tree_index, []).append(fi)
@@ -75,6 +80,7 @@ def write_obj(path, level, realm, scale=0.01, owner=None, portals=True):
                 used = sorted({v for fi in part for v in (t.faces[fi].v0, t.faces[fi].v1, t.faces[fi].v2)})
                 remap = {}
                 f.write("o %s%s\n" % (name, suffix))
+                vmap["objects"][name + suffix] = {"offset": list(off), "vertices": used}
                 for v in used:
                     p = pos[v]
                     r, g, b = colors[v]
@@ -96,6 +102,10 @@ def write_obj(path, level, realm, scale=0.01, owner=None, portals=True):
                 f.write("f %d %d %d\n" % (next_index, next_index + 1, next_index + 2))
                 f.write("f %d %d %d\n" % (next_index + 3, next_index + 4, next_index + 5))
                 next_index += 6
+    # Which level vertex each OBJ vertex is, so an edited OBJ can be applied
+    # back with levelpatch.py (OBJ files themselves carry no ids).
+    with open(path + ".map.json", "w") as f:
+        json.dump(vmap, f)
     return path
 
 

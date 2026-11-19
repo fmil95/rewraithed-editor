@@ -13,7 +13,10 @@ from drm import Drm
 # --- sizes -----------------------------------------------------------------
 SIZEOF_TVERTEX = 0xC
 SIZEOF_TFACE = 0xC
-SIZEOF_NORMAL = 0x8
+# Terrain normals are packed 3-short triples (COLLIDE_GetNormal), not the
+# 8-byte Normal struct: x is 13-bit two's complement in the low bits of the
+# first short, the top 3 bits hold the dominant axis (0 = x, 1 = y, 2 = z).
+SIZEOF_NORMAL = 0x6
 SIZEOF_INTRO = 0x4C
 SIZEOF_PORTAL = 0x5C
 SIZEOF_MORPHVERTEX = 0xE
@@ -189,7 +192,7 @@ class Terrain:
     ptrs: dict
     vertices: List[Vertex] = field(default_factory=list)
     faces: List[Face] = field(default_factory=list)
-    normals: List[Tuple[int, int, int]] = field(default_factory=list)
+    normals: List[Tuple[int, int, int, int]] = field(default_factory=list)  # (x, y, z, axis)
     intros: List[Intro] = field(default_factory=list)
     portals: List[Portal] = field(default_factory=list)
     morph_vertices: List[MorphVertex] = field(default_factory=list)
@@ -223,6 +226,24 @@ TERRAIN_PTRS = {
 }
 
 
+def decode_normal(sx, y, z):
+    x = sx & 0x1FFF
+    if x & 0x1000:
+        x -= 0x2000
+    return (x, y, z, (sx >> 13) & 7)
+
+
+def encode_normal(x, y, z, axis):
+    v = (x & 0x1FFF) | ((axis & 7) << 13)
+    if v & 0x8000:
+        v -= 0x10000
+    return (v, y, z)
+
+
+def signed16(v):
+    return v - 0x10000 if v & 0x8000 else v
+
+
 def _str16(d: Drm, off):
     return d.body[off:off + 16].split(b"\0")[0].decode("latin-1")
 
@@ -251,7 +272,7 @@ def parse_terrain(d: Drm, off) -> Terrain:
     if p["normalList"] is not None:
         base = p["normalList"]
         for i in range(t.numNormals):
-            t.normals.append(d.unpack("hhh", base + i * SIZEOF_NORMAL))
+            t.normals.append(decode_normal(*d.unpack("hhh", base + i * SIZEOF_NORMAL)))
 
     if p["introList"] is not None:
         base = p["introList"]

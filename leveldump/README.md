@@ -40,12 +40,42 @@ In Blender: *File > Import > Wavefront (.obj)*, choose **Z up, Y forward**
 of double-sided faces); portals are separate `portal<n>_<dest>` quads.
 Vertex colours are written as `v x y z r g b`; they show up as a colour attribute.
 
+## Editing a level (levelpatch.py)
+
+`levelpatch.py` writes a modified `.drm` that keeps the level's vertices, faces
+and BSP trees, and rebuilds what depends on vertex positions: face normals
+(appending to the normal list when needed), the morph data's material
+positions, and the spheres, boxes and plane error fields of every BSP leaf and
+node above a changed face. Adding or deleting geometry needs a BSP compiler
+and isn't supported yet.
+
+```
+# 1. export (writes under1_material.obj and under1_material.obj.map.json)
+python leveldump.py --disc <path>/KAIN2.img under1 --obj work/
+# 2. Blender: import with Z up / Y forward, move vertices (do not add or delete
+#    any, do not rename or join objects), export OBJ with Z up / Y forward,
+#    Colors on if you painted vertex colours
+# 3. write the level into the port's mods folder
+python levelpatch.py --disc <path>/KAIN2.img under1 --material-obj edited.obj \
+    --map work/under1_material.obj.map.json --install <rewraithed exe folder>/mods
+```
+
+`--hill X Y RADIUS HEIGHT [--tint R G B]` is a scripted test edit that needs no
+Blender. Every output is re-read and checked before it's written. An OBJ
+exported by Blender without changes patches back to a byte-identical level.
+
+The port loads `mods\kain2\area\under\bin\under1.drm` next to `rewraithed.exe`
+in place of the copy in `BIGFILE.DAT`; delete the file to go back. For quick
+tests: `rewraithed.exe -area under1 -skipmenu -skiplogos -skipcutscene`.
+
 ## Files
 
 | file | |
 |---|---|
 | `disc.py` | ISO 9660 reader for the CD image, `BIGFILE.DAT` directories, `LOAD_HashName` / `LOAD_HashUnit` |
-| `drm.py` | relocation table (`LOAD_RelocBinaryData` / `RESOLVE_Pointers`) |
+| `drm.py` | relocation table (`LOAD_RelocBinaryData` / `RESOLVE_Pointers`), writing back, inserting bytes with pointer fix-up |
+| `edit.py` | layout-preserving geometry edits and the rebuild of normals and BSP bounds |
+| `levelpatch.py` | command line for edits (OBJ or scripted) |
 | `level.py` | struct layouts: `Level`, `Terrain`, `TVertex`, `TFace`, `Intro`, `StreamUnitPortal`, `MorphVertex`, `BSPTree`, `BSPNode`, `BSPLeaf` |
 | `analyze.py` | BSP walking and the checks of stored bounds against the geometry |
 | `objexport.py` | OBJ writer |
@@ -86,6 +116,11 @@ NULL pointers are 0 and are not in the table. The body starts with the
 
 ### Terrain
 
+* `normalList` is packed 3-short triples (6 bytes each, not the 8-byte `Normal`
+  struct): `x` is 13-bit two's complement in the low bits of the first short, and
+  the top 3 bits hold the dominant axis (0 = x, 1 = y, 2 = z). A face's normal is
+  `cross(v1 - v0, v2 - v0)` normalised to 4096; `TFace.normal` is the index, and
+  a negative index means the negated normal (`COLLIDE_GetNormal`).
 * `vertexList` holds the material realm positions. `TVertex.rgb15` is the
   material vertex colour (15-bit); `r0,g0,b0` are the same colour at 8 bits.
 * `MorphDiffList` is terminated by `vindex < 0`. For each entry,
