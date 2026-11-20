@@ -230,6 +230,11 @@ Commands that name things in the source unit are adjusted:
 * 14 (the stream units the monster may be in) becomes the destination unit;
 * the rest (behaviours, hit points, ranges, age, the spectral flag, respawn) is kept.
 
+Every new intro starts visible: the intro flag 0x80 (the instance is created
+hidden, `INSTANCE_IntroduceInstance`, until a script of its unit shows it, as
+`pillars1` does with its health and energy circles) is cleared, since the new unit
+has no script for it.
+
 Some objects need other object types loaded without placing one: every unit with
 hunters also loads their weapon (`fthrow` or `xbow`). `--extra-objects
 fthrow:city4` appends such types to the object list and copies their files.

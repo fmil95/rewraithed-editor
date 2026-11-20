@@ -208,6 +208,12 @@ def apply_intros(data, obj_path, scale=0.01, template_levels=()):
         struct.pack_into("<hhh", rec, 0x20, *pos)
         struct.pack_into("<h", rec, 0x1C, yaw - 4096 if yaw >= 2048 else yaw)
         struct.pack_into("<hhh", rec, 0x44, 0, 0, 0)
+        # 0x80: starts hidden until a script of its unit shows it (pillars1's health
+        # circles); 0x8: already brought in. A new intro has no script of its own.
+        flags = struct.unpack_from("<i", rec, 0x2C)[0]
+        if flags & 0x88:
+            struct.pack_into("<i", rec, 0x2C, flags & ~0x88)
+            report.append("%s starts visible (it was hidden until a script showed it)" % typ)
         report.append("added %s (UniqueID %d) at %s" % (typ, next_uid, pos))
         next_uid += 1
         records.append([rec, ptrs])

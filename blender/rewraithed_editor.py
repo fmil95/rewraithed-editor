@@ -11,7 +11,7 @@ Blender's own Python, so nothing else needs installing.
 bl_info = {
     "name": "Rewraithed level editor",
     "author": "rewraithed",
-    "version": (0, 2, 0),
+    "version": (0, 2, 1),
     "blender": (4, 2, 0),
     "location": "3D View > Sidebar > Rewraithed",
     "description": "Edit Soul Reaver prototype levels for the rewraithed PC port",
