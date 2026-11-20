@@ -11,7 +11,7 @@ Blender's own Python, so nothing else needs installing.
 bl_info = {
     "name": "Rewraithed level editor",
     "author": "rewraithed",
-    "version": (0, 2, 2),
+    "version": (0, 3, 2),
     "blender": (4, 2, 0),
     "location": "3D View > Sidebar > Rewraithed",
     "description": "Edit Soul Reaver prototype levels for the rewraithed PC port",
@@ -26,8 +26,11 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 import bpy
+import bpy.utils.previews
+from bpy.app.handlers import persistent
 from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty,
                        StringProperty)
 from mathutils import Vector
@@ -47,6 +50,8 @@ KINDS = [
 ]
 KIND_COLOUR = {k: c for k, c, _, _ in KINDS}
 KIND_ICON = {k: i for k, _, i, _ in KINDS}
+# every special ability, Reaver and glyph (the debug menu's three "ALL" entries, DEBUG.c)
+ALL_ABILITIES = 0x3F | 0x3FC00 | 0x01FC0000
 MARKERS = {"marker", "campath"}       # the unit's own path and camera markers: not in the library
 
 
@@ -445,6 +450,111 @@ def _fill_library(scene):
         it.kind = e["kind"]
         it.count = e["count"]
     scene.rewr_library_index = min(scene.rewr_library_index, max(len(lib) - 1, 0))
+    units = scene.rewr_units
+    units.clear()
+    for u in sorted(_CATALOG["data"].get("units", []), key=_natural):
+        units.add().name = u
+
+
+def _natural(name):
+    """city2 before city10"""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", name)]
+
+
+# --- thumbnails -------------------------------------------------------------------
+
+_PREVIEWS = {"coll": None}
+THUMB = 128
+
+
+def _previews():
+    if _PREVIEWS["coll"] is None:
+        _PREVIEWS["coll"] = bpy.utils.previews.new()
+    return _PREVIEWS["coll"]
+
+
+def _render_thumb(verts, faces, colour, size=THUMB):
+    """The model seen from the front right and a little above, flat shaded:
+    RGBA floats, bottom row first (as Blender's previews want them)."""
+    import numpy as np
+    V = np.asarray(verts, dtype=np.float64)
+    F = np.asarray(faces, dtype=np.int64)
+    a, e = math.radians(-35), math.radians(18)
+    x = V[:, 0] * math.cos(a) - V[:, 1] * math.sin(a)
+    y = V[:, 0] * math.sin(a) + V[:, 1] * math.cos(a)
+    sy = V[:, 2] * math.cos(e) + y * math.sin(e)
+    depth = y * math.cos(e) - V[:, 2] * math.sin(e)          # the camera is at -Y: smaller is nearer
+    span = max(x.max() - x.min(), sy.max() - sy.min(), 1e-6)
+    k = (size * 0.9) / span
+    px = (x - (x.max() + x.min()) / 2) * k + size / 2
+    py = (sy - (sy.max() + sy.min()) / 2) * k + size / 2
+    P = np.stack([px, py, depth], axis=1)
+    img = np.zeros((size, size, 4))
+    zbuf = np.full((size, size), np.inf)
+    light = np.array([0.4, -0.75, 0.55])
+    light /= np.linalg.norm(light)
+    view = np.stack([x, y, V[:, 2]], axis=1)
+    for f in F:
+        p0, p1, p2 = P[f[0]], P[f[1]], P[f[2]]
+        n = np.cross(view[f[1]] - view[f[0]], view[f[2]] - view[f[0]])
+        ln = np.linalg.norm(n)
+        d = (p1[1] - p2[1]) * (p0[0] - p2[0]) + (p2[0] - p1[0]) * (p0[1] - p2[1])
+        if ln == 0 or abs(d) < 1e-9:
+            continue
+        shade = 0.35 + 0.65 * abs(float(np.dot(n / ln, light)))
+        x0 = int(max(0, math.floor(min(p0[0], p1[0], p2[0]))))
+        x1 = int(min(size - 1, math.ceil(max(p0[0], p1[0], p2[0]))))
+        y0 = int(max(0, math.floor(min(p0[1], p1[1], p2[1]))))
+        y1 = int(min(size - 1, math.ceil(max(p0[1], p1[1], p2[1]))))
+        if x1 < x0 or y1 < y0:
+            continue
+        gx, gy = np.meshgrid(np.arange(x0, x1 + 1) + 0.5, np.arange(y0, y1 + 1) + 0.5)
+        w0 = ((p1[1] - p2[1]) * (gx - p2[0]) + (p2[0] - p1[0]) * (gy - p2[1])) / d
+        w1 = ((p2[1] - p0[1]) * (gx - p2[0]) + (p0[0] - p2[0]) * (gy - p2[1])) / d
+        w2 = 1 - w0 - w1
+        inside = (w0 >= -1e-6) & (w1 >= -1e-6) & (w2 >= -1e-6)
+        z = w0 * p0[2] + w1 * p1[2] + w2 * p2[2]
+        sub = zbuf[y0:y1 + 1, x0:x1 + 1]
+        win = inside & (z < sub)
+        sub[win] = z[win]
+        img[y0:y1 + 1, x0:x1 + 1][win] = (colour[0] * shade, colour[1] * shade, colour[2] * shade, 1.0)
+    return img.ravel()
+
+
+def _model_preview(typ):
+    """icon_id of the type's thumbnail, or 0 if it has no model to show."""
+    key = "model " + typ
+    pc = _previews()
+    if key in pc:
+        return pc[key].icon_id
+    m = (_types().get(typ) or {}).get("model")
+    if not m or len(m["faces"]) < 2:
+        return 0
+    try:
+        pixels = _render_thumb(m["verts"], m["faces"], _type_colour(typ))
+    except Exception as ex:                # never break the panel over a thumbnail
+        print("rewraithed: no thumbnail for %s: %s" % (typ, ex))
+        return 0
+    pv = pc.new(key)
+    pv.image_size = (THUMB, THUMB)
+    pv.image_pixels_float = pixels
+    return pv.icon_id
+
+
+def _play_icon():
+    """A green play triangle for the Play button."""
+    pc = _previews()
+    if "play" not in pc:
+        n = 32
+        px = []
+        for y in range(n):
+            for x in range(n):
+                inside = 7 <= x <= 26 and abs(y - 15.5) <= (26 - x) * 0.6
+                px += (0.2, 0.85, 0.3, 1.0) if inside else (0.0, 0.0, 0.0, 0.0)
+        pv = pc.new("play")
+        pv.image_size = (n, n)
+        pv.image_pixels_float = px
+    return pc["play"].icon_id
 
 
 def _type_colour(typ):
@@ -525,7 +635,7 @@ def _make_intro(collection, typ, uid, pos, yaw):
     o["rewr_pos"] = tuple(pos)
     o.lock_rotation = (True, True, False)       # the game keeps their tilt; turn them around Z
     o.lock_scale = (True, True, True)
-    o.show_name = _kind(typ) != "marker"
+    o.show_name = False          # _draw_labels draws a clearer one
     o.color = tuple(_type_colour(typ)) + (1.0,)
     return o
 
@@ -632,6 +742,80 @@ def _snap_update(self, context):
     _apply_snap(context)
 
 
+# --- labels -----------------------------------------------------------------------
+
+LABEL_NEAR, LABEL_FAR = 30.0, 60.0        # metres from the view: full, then fading out
+_LABELS = {"handle": None}
+
+
+def _redraw_views(self=None, context=None):
+    for w in bpy.context.window_manager.windows:
+        for a in w.screen.areas:
+            if a.type == "VIEW_3D":
+                a.tag_redraw()
+
+
+def _draw_labels():
+    """A dark box with the type's name above each object, framed in its colour
+    (orange when selected). Far ones fade out; markers only show when selected."""
+    import blf
+    import gpu
+    from bpy_extras.view3d_utils import location_3d_to_region_2d
+    from gpu_extras.batch import batch_for_shader
+    ctx = bpy.context
+    s = ctx.scene
+    if s is None or not s.rewr_open_unit or not s.rewr_labels:
+        return
+    col = bpy.data.collections.get(_col_name(s.rewr_open_unit, "objects"))
+    region, rv3d = ctx.region, ctx.region_data
+    if col is None or region is None or rv3d is None:
+        return
+    eye = rv3d.view_matrix.inverted().translation
+    ui = ctx.preferences.system.ui_scale
+    font = 0
+    blf.size(font, 12 * ui)
+    _, text_h = blf.dimensions(font, "Mg")
+    pad = 4 * ui
+    items = []
+    for o in col.objects:
+        typ = o.get("rewr_type")
+        if not typ or not o.visible_get():
+            continue
+        sel = o.select_get()
+        if _kind(typ) == "marker" and not sel:
+            continue
+        top = max(v[2] for v in o.bound_box) + 0.2
+        at = o.matrix_world @ Vector((0.0, 0.0, top))
+        dist = (at - eye).length if rv3d.is_perspective else 0.0
+        if dist > LABEL_FAR and not sel:
+            continue
+        p = location_3d_to_region_2d(region, rv3d, at)
+        if p is None:
+            continue
+        alpha = 1.0 if sel or dist <= LABEL_NEAR else 1.0 - (dist - LABEL_NEAR) / (LABEL_FAR - LABEL_NEAR)
+        items.append((sel, -dist, typ, p, alpha))
+    if not items:
+        return
+    items.sort(key=lambda t: (t[0], t[1]))        # far ones first, selected on top
+    shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+    gpu.state.blend_set("ALPHA")
+    for sel, _, typ, p, alpha in items:
+        w, _ = blf.dimensions(font, typ)
+        x0, x1 = p.x - w / 2 - pad, p.x + w / 2 + pad
+        y0, y1 = p.y, p.y + text_h + 2 * pad
+        quad = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        shader.bind()
+        shader.uniform_float("color", (0.04, 0.04, 0.05, 0.8 * alpha))
+        batch_for_shader(shader, "TRIS", {"pos": quad}, indices=((0, 1, 2), (2, 3, 0))).draw(shader)
+        edge = (1.0, 0.55, 0.1) if sel else tuple(_type_colour(typ))
+        shader.uniform_float("color", edge + (alpha,))
+        batch_for_shader(shader, "LINE_STRIP", {"pos": quad + [quad[0]]}).draw(shader)
+        blf.position(font, x0 + pad, y0 + pad + text_h * 0.15, 0)
+        blf.color(font, 1.0, 1.0, 1.0, alpha)
+        blf.draw(font, typ)
+    gpu.state.blend_set("NONE")
+
+
 def open_unit(context, unit):
     """Export `unit` (as it is now in the game: the mods folder's copy if
     there) and load it into the scene. Returns (ok, message)."""
@@ -701,6 +885,7 @@ class REWR_OT_open_unit(_ToolOperator, bpy.types.Operator):
     else the disc's. Replaces what the editor loaded before (unsaved Blender edits are lost)"""
     bl_idname = "rewraithed.open_unit"
     bl_label = "Open unit"
+    bl_options = {"UNDO"}        # Ctrl+Z must not step back past unrecorded changes
 
     def execute(self, context):
         if not self._ready():
@@ -722,16 +907,20 @@ class REWR_OT_add_object(_ToolOperator, bpy.types.Operator):
     bl_label = "Add at the 3D cursor"
     bl_options = {"REGISTER", "UNDO"}
 
+    typ: StringProperty(name="Type", options={"SKIP_SAVE"})
+
     def execute(self, context):
         s = context.scene
         col = bpy.data.collections.get(_col_name(s.rewr_open_unit, "objects")) if s.rewr_open_unit else None
         if col is None:
             self.report({"ERROR"}, "Open a unit first")
             return {"CANCELLED"}
-        if not 0 <= s.rewr_library_index < len(s.rewr_library):
-            self.report({"ERROR"}, "Pick an object in the library first")
-            return {"CANCELLED"}
-        typ = s.rewr_library[s.rewr_library_index].name
+        typ = self.typ
+        if not typ:
+            if not 0 <= s.rewr_library_index < len(s.rewr_library):
+                self.report({"ERROR"}, "Pick an object in the library first")
+                return {"CANCELLED"}
+            typ = s.rewr_library[s.rewr_library_index].name
         if context.mode != "OBJECT":
             bpy.ops.object.mode_set(mode="OBJECT")
         o = _make_intro(col, typ, 0, s.cursor.location.copy(), 0.0)
@@ -744,6 +933,61 @@ class REWR_OT_add_object(_ToolOperator, bpy.types.Operator):
         self.report({"INFO"}, "Added %s%s; G moves it, R turns it" % (
             typ, "" if on_floor else " (no floor under the cursor)"))
         return {"FINISHED"}
+
+
+_LAST_PICK = {"index": -1, "time": 0.0}
+DOUBLE_CLICK = 0.45      # seconds
+
+
+class REWR_OT_pick_type(bpy.types.Operator):
+    """Pick an object type; double-click to add it at the 3D cursor"""
+    bl_idname = "rewraithed.pick_type"
+    bl_label = "Pick object type"
+    bl_options = {"INTERNAL", "UNDO"}     # a double-click adds an object: one undo step
+
+    library_index: IntProperty(options={"SKIP_SAVE"})
+
+    @classmethod
+    def description(cls, context, properties):
+        lib = context.scene.rewr_library
+        if not 0 <= properties.library_index < len(lib):
+            return cls.__doc__
+        typ = lib[properties.library_index].name
+        e = _types().get(typ, {})
+        units = sorted(e.get("units", {}).items(), key=lambda kv: -kv[1])
+        where = ", ".join(u for u, _ in units[:5])
+        if len(units) > 5:
+            where += " and %d more units" % (len(units) - 5)
+        return "%s: %d in the game, in %s.\nDouble-click to add one at the 3D cursor, or right-click" % (
+            typ, e.get("count", 0), where)
+
+    def execute(self, context):
+        s = context.scene
+        i = self.library_index
+        now = time.monotonic()
+        double = _LAST_PICK["index"] == i and now - _LAST_PICK["time"] < DOUBLE_CLICK
+        s.rewr_library_index = i
+        if double:
+            _LAST_PICK.update(index=-1, time=0.0)     # a third click starts over
+            if 0 <= i < len(s.rewr_library):
+                bpy.ops.rewraithed.add_object("EXEC_DEFAULT", typ=s.rewr_library[i].name)
+        else:
+            _LAST_PICK.update(index=i, time=now)
+        return {"FINISHED"}
+
+
+def _list_context_menu(self, context):
+    """Right-click on a library row: add that type."""
+    op = getattr(context, "button_operator", None)
+    if op is None or "library_index" not in op.bl_rna.properties:
+        return
+    lib = context.scene.rewr_library
+    if not 0 <= op.library_index < len(lib):
+        return
+    typ = lib[op.library_index].name
+    lay = self.layout
+    lay.operator("rewraithed.add_object", text="Add %s at the 3D cursor" % typ, icon="ADD").typ = typ
+    lay.separator()
 
 
 class REWR_OT_drop_to_floor(bpy.types.Operator):
@@ -767,6 +1011,7 @@ class REWR_OT_refresh_library(_ToolOperator, bpy.types.Operator):
     """Read the list of every object type in the game again (after installing new units)"""
     bl_idname = "rewraithed.refresh_library"
     bl_label = "Refresh library"
+    bl_options = {"UNDO"}        # Ctrl+Z must not step back past unrecorded changes
 
     def execute(self, context):
         if not self._ready():
@@ -781,6 +1026,7 @@ class REWR_OT_install(_ToolOperator, bpy.types.Operator):
     """Write the edited unit into the game's mods folder, check it, and reload it here"""
     bl_idname = "rewraithed.install"
     bl_label = "Install into the game"
+    bl_options = {"UNDO"}        # Ctrl+Z must not step back past unrecorded changes
 
     def execute(self, context):
         if not self._ready():
@@ -896,8 +1142,8 @@ class REWR_OT_launch(_ToolOperator, bpy.types.Operator):
         cmd = [os.path.join(_game_dir(), "rewraithed.exe"), "-area", unit, "-skipmenu", "-skiplogos"]
         if s.rewr_play_material:
             cmd.append("-material")
-        if s.rewr_play_swim:
-            cmd.append("-swim")
+        if s.rewr_play_abilities:
+            cmd += ["-abilities", "0x%X" % ALL_ABILITIES]
         if s.rewr_play_skipcutscene:
             cmd.append("-skipcutscene")
         if s.rewr_play_vramlog:
@@ -912,6 +1158,7 @@ class REWR_OT_revert(_ToolOperator, bpy.types.Operator):
     again (object files and other units' files stay)"""
     bl_idname = "rewraithed.revert"
     bl_label = "Back to the original"
+    bl_options = {"UNDO"}        # Ctrl+Z must not step back past unrecorded changes
 
     def invoke(self, context, event):
         return context.window_manager.invoke_confirm(self, event)
@@ -977,11 +1224,15 @@ class REWR_PT_panel(bpy.types.Panel):
         box = lay.box()
         box.label(text="1. Unit", icon="WORLD")
         row = box.row(align=True)
-        row.prop(s, "rewr_unit", text="")
+        if len(s.rewr_units):
+            row.prop_search(s, "rewr_unit", s, "rewr_units", text="", icon="WORLD")
+        else:
+            row.prop(s, "rewr_unit", text="")
         row.operator("rewraithed.open_unit", text="Open")
         if s.rewr_open_unit:
             box.label(text="Editing: %s" % s.rewr_open_unit)
-            box.prop(s, "rewr_realm", expand=True)
+            row = box.row(align=True)
+            row.prop(s, "rewr_realm", expand=True)
 
         if s.rewr_open_unit:
             box = lay.box()
@@ -990,21 +1241,19 @@ class REWR_PT_panel(bpy.types.Panel):
             box.template_list("REWR_UL_library", "", s, "rewr_library", s, "rewr_library_index", rows=8)
             if 0 <= s.rewr_library_index < len(s.rewr_library):
                 typ = s.rewr_library[s.rewr_library_index].name
-                e = _types().get(typ, {})
-                col = box.column(align=True)
-                units = sorted(e.get("units", {}).items(), key=lambda kv: -kv[1])
-                col.label(text="%s: %d in the game, in %d units" % (typ, e.get("count", 0), len(units)))
-                if units:
-                    col.label(text="For example in " + ", ".join(u for u, _ in units[:4]))
-                if e.get("deps"):
-                    col.label(text="Brings along: " + ", ".join(e["deps"]))
-                box.operator("rewraithed.add_object", icon="ADD")
+                icon = _model_preview(typ)
+                if icon:
+                    box.template_icon(icon_value=icon, scale=7.0)
+                else:
+                    box.label(text="No model to show (an effect or helper)", icon="INFO")
+                box.label(text="Double-click: add at the 3D cursor", icon="MOUSE_LMB_2X")
             row = box.row(align=True)
             row.label(text="Snap")
             row.prop(s, "rewr_snap", expand=True)
             if s.rewr_snap == "GRID":
                 box.prop(s, "rewr_grid")
             row = box.row(align=True)
+            row.prop(s, "rewr_labels", toggle=True, icon="SMALL_CAPS")
             row.operator("rewraithed.drop_to_floor", icon="TRIA_DOWN_BAR")
             row.operator("rewraithed.refresh_library", text="", icon="FILE_REFRESH")
 
@@ -1013,15 +1262,21 @@ class REWR_PT_panel(bpy.types.Panel):
             box.operator("rewraithed.install", icon="IMPORT")
             box.operator("rewraithed.check_budget", icon="MEMORY")
             col = box.column(align=True)
-            col.operator("rewraithed.launch", icon="PLAY")
+            col.operator("rewraithed.launch", icon_value=_play_icon())
             row = col.row(align=True)
             row.prop(s, "rewr_play_material", toggle=True)
-            row.prop(s, "rewr_play_swim", toggle=True)
+            row.prop(s, "rewr_play_abilities", toggle=True)
             row = col.row(align=True)
             row.prop(s, "rewr_play_skipcutscene", toggle=True)
             row.prop(s, "rewr_play_vramlog", toggle=True)
-            box.operator("rewraithed.revert", icon="LOOP_BACK")
+            row = box.row()
+            row.alert = True                      # red: it throws your version away
+            row.operator("rewraithed.revert", icon="LOOP_BACK")
         lay.operator("rewraithed.show_log", icon="TEXT")
+
+
+class REWR_UnitItem(bpy.types.PropertyGroup):
+    pass
 
 
 class REWR_LibraryItem(bpy.types.PropertyGroup):
@@ -1033,11 +1288,15 @@ class REWR_UL_library(bpy.types.UIList):
     """Every object type in the game; type in the search box to find one"""
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index=0):
-        row = layout.row()
-        row.label(text=item.name, icon=KIND_ICON.get(item.kind, "OBJECT_DATA"))
-        sub = row.row()
-        sub.alignment = "RIGHT"
-        sub.label(text="%d" % item.count)
+        split = layout.split(factor=0.8)
+        name = split.row()
+        name.alignment = "LEFT"
+        op = name.operator("rewraithed.pick_type", text=item.name, icon=KIND_ICON.get(item.kind, "OBJECT_DATA"),
+                           emboss=False)
+        op.library_index = index
+        count = split.row()
+        count.alignment = "RIGHT"
+        count.label(text="%d" % item.count)
 
     def filter_items(self, context, data, propname):
         items = getattr(data, propname)
@@ -1050,12 +1309,13 @@ class REWR_UL_library(bpy.types.UIList):
         return flags, []
 
 
-CLASSES = (RewraithedPreferences, REWR_LibraryItem, REWR_UL_library, REWR_OT_open_unit, REWR_OT_add_object,
+CLASSES = (RewraithedPreferences, REWR_UnitItem, REWR_LibraryItem, REWR_UL_library, REWR_OT_open_unit,
+           REWR_OT_pick_type, REWR_OT_add_object,
            REWR_OT_drop_to_floor, REWR_OT_refresh_library, REWR_OT_install, REWR_OT_check_budget,
            REWR_OT_launch, REWR_OT_revert, REWR_OT_show_log, REWR_PT_panel)
 
-SCENE_PROPS = ("rewr_unit", "rewr_open_unit", "rewr_realm", "rewr_library", "rewr_library_index",
-               "rewr_lib_kind", "rewr_snap", "rewr_grid", "rewr_play_material", "rewr_play_swim",
+SCENE_PROPS = ("rewr_unit", "rewr_units", "rewr_open_unit", "rewr_realm", "rewr_library", "rewr_library_index",
+               "rewr_lib_kind", "rewr_snap", "rewr_grid", "rewr_play_material", "rewr_play_abilities", "rewr_labels",
                "rewr_play_skipcutscene", "rewr_play_vramlog")
 
 
@@ -1063,8 +1323,10 @@ def register():
     for c in CLASSES:
         bpy.utils.register_class(c)
     S = bpy.types.Scene
-    S.rewr_unit = StringProperty(name="Unit", default="city9", description="Unit to open, e.g. city9")
+    S.rewr_unit = StringProperty(name="Unit", default="city9",
+                                 description="Unit to open: click to pick from every unit in the game, or type to search")
     S.rewr_open_unit = StringProperty(name="Open unit")
+    S.rewr_units = CollectionProperty(type=REWR_UnitItem)
     S.rewr_library = CollectionProperty(type=REWR_LibraryItem)
     S.rewr_library_index = IntProperty(name="Object type")
     S.rewr_lib_kind = EnumProperty(
@@ -1082,13 +1344,55 @@ def register():
                                                      ("SPECTRAL", "Spectral", "Show the spectral realm")],
                                 update=_realm_update)
     S.rewr_play_material = BoolProperty(name="Material", description="Start in the material realm")
-    S.rewr_play_swim = BoolProperty(name="Swim", description="Raziel can swim")
-    S.rewr_play_skipcutscene = BoolProperty(name="No cutscene", description="Skip the unit's cutscene")
+    S.rewr_play_abilities = BoolProperty(name="All abilities",
+                                         description="Raziel starts with every ability, Reaver and glyph "
+                                                     "(swimming, wall climbing, passing barriers...)")
+    S.rewr_labels = BoolProperty(name="Labels", default=True, update=_redraw_views,
+                                 description="Show each object's name in a box above it")
+    S.rewr_play_skipcutscene = BoolProperty(
+        name="No cutscene",
+        description="Skip the opening cutscene (under1's). It is the debug menu's Skip First Puppet Show: a "
+                    "switch for the whole session, so any other scene that checks it is skipped too")
     S.rewr_play_vramlog = BoolProperty(name="Memory log",
                                        description="Log object video memory to vram.log next to the game")
+    bpy.types.UI_MT_button_context_menu.prepend(_list_context_menu)
+    bpy.app.handlers.load_post.append(_on_load)
+    bpy.app.timers.register(_startup, first_interval=0.5)
+    _LABELS["handle"] = bpy.types.SpaceView3D.draw_handler_add(_draw_labels, (), "WINDOW", "POST_PIXEL")
+
+
+def _fill_scene_lists():
+    """The unit and library lists, from the game's object list (built the first time)."""
+    if _setup_problem() is None and bpy.context.scene is not None:
+        try:
+            _load_catalog()
+        except Exception as ex:
+            print("rewraithed: could not read the object list: %s" % ex)
+
+
+def _startup():
+    _fill_scene_lists()
+    return None          # once
+
+
+@persistent
+def _on_load(_):
+    # a new or opened .blend has its own scene, without the lists
+    bpy.app.timers.register(_startup, first_interval=0.1)
 
 
 def unregister():
+    if _LABELS["handle"] is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(_LABELS["handle"], "WINDOW")
+        _LABELS["handle"] = None
+    bpy.types.UI_MT_button_context_menu.remove(_list_context_menu)
+    if _on_load in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load)
+    if bpy.app.timers.is_registered(_startup):
+        bpy.app.timers.unregister(_startup)
+    if _PREVIEWS["coll"] is not None:
+        bpy.utils.previews.remove(_PREVIEWS["coll"])
+        _PREVIEWS["coll"] = None
     S = bpy.types.Scene
     for p in SCENE_PROPS:
         if hasattr(S, p):

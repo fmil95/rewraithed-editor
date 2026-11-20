@@ -21,7 +21,8 @@ folder next to `rewraithed.exe`; the game disc is never changed.
 
 ### 1. Open it
 
-Type the unit's name (`city9`, `under1`...) and press **Open**. This clears what the
+Click the unit box to pick from every unit in the game (type part of a name, like
+`under`, to narrow the list), then press **Open**. This clears what the
 editor loaded before, so unsaved Blender changes to the previous unit are lost. If you
 already installed an edited version of the unit, that version opens, so your changes
 build on each other.
@@ -43,7 +44,8 @@ sharp pixels). If the textures disappear, switch the 3D view back to *Material
 Preview* (the third sphere at the top right). Fly through with **Shift+`**
 (W/A/S/D, mouse to look) or use the numpad keys for views from above.
 
-Each object shows as its own model in its own colour, with its name above it and a
+Each object shows as its own model in its own colour, with its name in a box above
+it (orange when selected; far away ones fade out, and **Labels** turns them off), and a
 small pointer on the ground showing which way it faces. Raziel's start is green,
 effects with nothing to see (flames, sounds, helpers) are white diamonds, and the
 unit's path and camera markers are small grey diamonds. Some objects float a little
@@ -73,13 +75,14 @@ geometry and you can shape it.
 **The object library** (*2. Objects*) lists every object type in the game (375 of
 them), with how many the game has. Pick a kind at the top (creatures, bosses,
 objects, effects, Raziel's start) or type part of a name in the search box at the
-bottom of the list. Below the list it says which units use the selected type. To
-place one:
+bottom of the list. Hovering over a type says where the game uses it; clicking it
+shows a picture of its model below the list. To place one:
 
 1. **Shift+right-click** on the ground where you want it; this puts the 3D cursor
    (the red and white ring) there.
-2. Pick the type in the list and press **Add at the 3D cursor**. It appears standing
-   on the floor, selected, so **G** and **R** move and turn it straight away.
+2. **Double-click** the type in the list, or right-click it and pick **Add ... at the
+   3D cursor**. It appears standing on the floor, selected, so **G** and **R** move
+   and turn it straight away.
 
 A type the unit doesn't have yet is copied, with its files, from a unit that has one
 when you install. It keeps its behaviour, but not its patrol route.
@@ -90,6 +93,8 @@ when you install. It keeps its behaviour, but not its patrol route.
 * **Surface**: a moved object sticks to the floor or wall under the mouse.
 * **Off**: move freely.
 * **Drop to floor** stands the selected objects on the terrain under them.
+* **Ctrl+Z** undoes the last thing you did, including adding an object or opening a
+  unit.
 * The refresh button reads the list of object types again; you only need it after
   installing units with types the game didn't have there before.
 
@@ -110,8 +115,8 @@ Rules that keep the level loading:
   warns you; a message like "city19 ... OVER, no room for hunter" means there are too
   many *different kinds* nearby. More of a kind already there costs nothing.
 * **Play this unit** starts the game in the unit. The buttons below it start it in the
-  material realm, let Raziel swim (needed for some units, such as `city20` in the
-  material realm), skip the unit's cutscene, or write a memory log (`vram.log`).
+  material realm, give Raziel every ability, Reaver and glyph (**All abilities**:
+  swimming is needed for some units, such as `city20` in the material realm), skip the opening cutscene (under1's), or write a memory log (`vram.log`).
   Starting in a unit needs Raziel's start in it. Not every original unit has one
   (`city19` and `city20` don't), so add one from the library (*Raziel's start*), or
   walk in from a neighbour.
