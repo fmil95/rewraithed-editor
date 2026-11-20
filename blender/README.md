@@ -116,7 +116,7 @@ Rules that keep the level loading:
   many *different kinds* nearby. More of a kind already there costs nothing.
 * **Play this unit** starts the game in the unit. The buttons below it start it in the
   material realm, give Raziel every ability, Reaver and glyph (**All abilities**:
-  swimming is needed for some units, such as `city20` in the material realm), skip the opening cutscene (under1's), or write a memory log (`vram.log`).
+  swimming is needed for some units, such as `city20` in the material realm), skip every cutscene (**No cutscenes**), or write a memory log (`vram.log`).
   Starting in a unit needs Raziel's start in it. Not every original unit has one
   (`city19` and `city20` don't), so add one from the library (*Raziel's start*), or
   walk in from a neighbour.

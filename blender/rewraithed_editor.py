@@ -11,7 +11,7 @@ Blender's own Python, so nothing else needs installing.
 bl_info = {
     "name": "Rewraithed level editor",
     "author": "rewraithed",
-    "version": (0, 3, 2),
+    "version": (0, 3, 3),
     "blender": (4, 2, 0),
     "location": "3D View > Sidebar > Rewraithed",
     "description": "Edit Soul Reaver prototype levels for the rewraithed PC port",
@@ -1350,9 +1350,9 @@ def register():
     S.rewr_labels = BoolProperty(name="Labels", default=True, update=_redraw_views,
                                  description="Show each object's name in a box above it")
     S.rewr_play_skipcutscene = BoolProperty(
-        name="No cutscene",
-        description="Skip the opening cutscene (under1's). It is the debug menu's Skip First Puppet Show: a "
-                    "switch for the whole session, so any other scene that checks it is skipped too")
+        name="No cutscenes",
+        description="Skip every cutscene: scenes play out too fast to see (so doors, enemies and the rest "
+                    "end up as the scene leaves them) and script-started movies are left out")
     S.rewr_play_vramlog = BoolProperty(name="Memory log",
                                        description="Log object video memory to vram.log next to the game")
     bpy.types.UI_MT_button_context_menu.prepend(_list_context_menu)
