@@ -26,19 +26,28 @@ editor loaded before, so unsaved Blender changes to the previous unit are lost. 
 already installed an edited version of the unit, that version opens, so your changes
 build on each other.
 
+The first time, it also reads every object type in the game for the library (a few
+seconds).
+
 You get three collections:
 
 | collection | what it is |
 |---|---|
 | `city9 material` | the terrain as it looks in the material realm |
 | `city9 spectral` | the same terrain in the spectral realm |
-| `city9 objects` | enemies, objects and Raziel's start, one small arrow each |
+| `city9 objects` | enemies, objects and Raziel's start, each drawn as its model |
 
 The **Material / Spectral** buttons switch which terrain you see. The unit opens
 textured and lit the way the game draws it (each texture tinted by the vertex colours,
-sharp pixels), with each object arrow labelled. If the textures disappear, switch the
-3D view back to *Material Preview* (the third sphere at the top right). Fly through
-with **Shift+`** (W/A/S/D, mouse to look) or use the numpad keys for views from above.
+sharp pixels). If the textures disappear, switch the 3D view back to *Material
+Preview* (the third sphere at the top right). Fly through with **Shift+`**
+(W/A/S/D, mouse to look) or use the numpad keys for views from above.
+
+Each object shows as its own model in its own colour, with its name above it and a
+small pointer on the ground showing which way it faces. Raziel's start is green,
+effects with nothing to see (flames, sounds, helpers) are white diamonds, and the
+unit's path and camera markers are small grey diamonds. Some objects float a little
+above the floor; that's where the game puts them, and they drop when they appear.
 
 ### 2. Change things
 
@@ -56,17 +65,33 @@ material realm, install that first; after the reload, the spectral realm has the
 geometry and you can shape it.
 
 **Objects** (`objects` collection):
-* Move an arrow to move the object, and rotate it around Z to turn it. The arrow's tip
-  is the way the object faces.
-* Delete an arrow to remove the object.
-* Duplicate an arrow (**Shift+D**) to add another of the same kind.
+* Click an object, then **G** to move it and **R** to turn it. Turning only goes
+  around the vertical axis, the way the game turns them.
+* **X** deletes it.
+* **Shift+D** copies it, with all its settings.
 
-**Enemies from another unit**: in *2. Objects from another unit*, type a unit (for
-example `city4`, which has hunters) and press **Bring**. Its objects appear in an
-`objects from city4` collection, where they stand in that unit, so they may be far
-away. To use one, select it, press **M** and pick `city9 objects`. Then move it to
-where you want it. To use several of the same kind, duplicate it first (**Shift+D**,
-then **M**). Anything left in `objects from city4` is ignored.
+**The object library** (*2. Objects*) lists every object type in the game (375 of
+them), with how many the game has. Pick a kind at the top (creatures, bosses,
+objects, effects, Raziel's start) or type part of a name in the search box at the
+bottom of the list. Below the list it says which units use the selected type. To
+place one:
+
+1. **Shift+right-click** on the ground where you want it; this puts the 3D cursor
+   (the red and white ring) there.
+2. Pick the type in the list and press **Add at the 3D cursor**. It appears standing
+   on the floor, selected, so **G** and **R** move and turn it straight away.
+
+A type the unit doesn't have yet is copied, with its files, from a unit that has one
+when you install. It keeps its behaviour, but not its patrol route.
+
+**Snapping**, below the library:
+* **Grid**: moving snaps to a grid (set its size: 0.5 m is 50 game units) and turning
+  goes in 15 degree steps. Works in Edit Mode on the terrain too.
+* **Surface**: a moved object sticks to the floor or wall under the mouse.
+* **Off**: move freely.
+* **Drop to floor** stands the selected objects on the terrain under them.
+* The refresh button reads the list of object types again; you only need it after
+  installing units with types the game didn't have there before.
 
 Rules that keep the level loading:
 * Don't rename or join objects in the `material` and `spectral` collections.
@@ -87,8 +112,9 @@ Rules that keep the level loading:
 * **Play this unit** starts the game in the unit. The buttons below it start it in the
   material realm, let Raziel swim (needed for some units, such as `city20` in the
   material realm), skip the unit's cutscene, or write a memory log (`vram.log`).
-  Starting in a unit needs a Raziel arrow in it. Not every original unit has one
-  (`city19` and `city20` don't), so add one, or walk in from a neighbour.
+  Starting in a unit needs Raziel's start in it. Not every original unit has one
+  (`city19` and `city20` don't), so add one from the library (*Raziel's start*), or
+  walk in from a neighbour.
 * **Back to the original** deletes your version of the unit, so the game uses the
   disc's again.
 
@@ -104,6 +130,7 @@ Rules that keep the level loading:
 
 * Make a new unit or new doorways between units (the command-line tools `newunit.py`
   and `units.py` can; see `../leveldump/README.md`).
-* Edit what enemies do (patrols, scripts). Copied enemies keep their behaviour but
-  lose the patrol markers from their old unit.
+* Edit what enemies do (patrols, scripts). Enemies from the library keep their
+  behaviour but have no patrol route.
+* Show objects with their textures (they're drawn in one colour each).
 * Turn or move a whole unit.

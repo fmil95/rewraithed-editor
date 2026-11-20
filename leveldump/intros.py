@@ -133,7 +133,7 @@ def apply_intros(data, obj_path, scale=0.01, template_levels=()):
     templates = {}
     for tl in template_levels:
         for it in tl.terrain.intros:
-            templates.setdefault(it.name, (tl, it))
+            templates.setdefault(it.name.lower(), (tl, it))   # "Hunter" in one unit, "hunter" in another
 
     # existing intros keep their place in the list (Blender writes objects in
     # name order); new ones follow in the file's order
@@ -175,14 +175,15 @@ def apply_intros(data, obj_path, scale=0.01, template_levels=()):
             continue
 
         # a new intro: from the duplicated original, else same type here, else a template unit
-        tmpl_it = src or next((it for it in t.intros if it.name == typ), None)
+        tmpl_it = src or next((it for it in t.intros if it.name.lower() == typ.lower()), None)
         if tmpl_it is not None:
             rec = bytearray(d.body[tmpl_it.offset: tmpl_it.offset + SIZEOF_INTRO])
             ptrs = ptr_fields(tmpl_it)
             ptrs[0x38] = None      # no spline: it would need its own copy
             typ = tmpl_it.name
-        elif typ in templates:
-            tl, tit = templates[typ]
+        elif typ.lower() in templates:
+            tl, tit = templates[typ.lower()]
+            typ = typ.lower()
             rec = bytearray(tl.drm.body[tit.offset: tit.offset + SIZEOF_INTRO])
             ptrs = {0x30: None, 0x34: None, 0x38: None, 0x3C: None}
             if tit.has_data:
@@ -194,14 +195,15 @@ def apply_intros(data, obj_path, scale=0.01, template_levels=()):
                 d.body += block
                 report.append("new %s copied from %s with its data block (%d bytes%s)" % (
                     typ, tl.worldName, len(block), "; dropped " + ", ".join(dropped) if dropped else ""))
-            tl_names, _ = _object_names(tl.drm)
-            if typ not in names_loaded and typ not in add_types and typ in tl_names:
+            tl_names = [n.lower() for n in _object_names(tl.drm)[0]]
+            loaded = [n.lower() for n in names_loaded]
+            if typ not in loaded and typ not in add_types and typ in tl_names:
                 add_types.append(typ)
                 add_sources[typ] = tl.worldName
         else:
             raise SystemExit("no intro of type %r in this level or the template units (--intro-templates)" % typ)
         struct.pack_into("<i", rec, 0x14, next_uid)
-        same = [it.intronum for it in t.intros if it.name == typ]
+        same = [it.intronum for it in t.intros if it.name.lower() == typ.lower()]
         struct.pack_into("<i", rec, 0x10, max(same + [0]) + 1 if same else 0)
         struct.pack_into("<hhh", rec, 0x20, *pos)
         struct.pack_into("<h", rec, 0x1C, yaw - 4096 if yaw >= 2048 else yaw)

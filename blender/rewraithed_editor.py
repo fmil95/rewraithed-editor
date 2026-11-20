@@ -11,7 +11,7 @@ Blender's own Python, so nothing else needs installing.
 bl_info = {
     "name": "Rewraithed level editor",
     "author": "rewraithed",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (4, 2, 0),
     "location": "3D View > Sidebar > Rewraithed",
     "description": "Edit Soul Reaver prototype levels for the rewraithed PC port",
@@ -19,6 +19,8 @@ bl_info = {
 }
 
 import hashlib
+import json
+import math
 import os
 import re
 import shutil
@@ -26,10 +28,26 @@ import subprocess
 import sys
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, StringProperty
+from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty,
+                       StringProperty)
+from mathutils import Vector
 
 LOG_NAME = "Rewraithed log"
 SCALE = 0.01
+INTRO = re.compile(r"^intro_(\d+)_(.+)$")
+
+# what each kind of object looks like: colour, and the library's icon and label
+KINDS = [
+    ("creature", (0.85, 0.12, 0.08), "GHOST_ENABLED", "Creatures"),
+    ("boss", (0.62, 0.18, 0.9), "OUTLINER_OB_ARMATURE", "Bosses"),
+    ("object", (0.95, 0.62, 0.12), "OBJECT_DATA", "Objects"),
+    ("effect", (0.92, 0.92, 0.92), "LIGHT_POINT", "Effects"),
+    ("start", (0.15, 0.9, 0.25), "ARMATURE_DATA", "Raziel's start"),
+    ("marker", (0.6, 0.6, 0.6), "EMPTY_SINGLE_ARROW", "Markers"),
+]
+KIND_COLOUR = {k: c for k, c, _, _ in KINDS}
+KIND_ICON = {k: i for k, _, i, _ in KINDS}
+MARKERS = {"marker", "campath"}       # the unit's own path and camera markers: not in the library
 
 
 # --- settings ---------------------------------------------------------------
@@ -367,6 +385,252 @@ def _realm_update(self, context):
     _set_realm(context.scene, self.rewr_realm)
 
 
+# --- the object library ---------------------------------------------------------
+
+_CATALOG = {"path": None, "mtime": None, "data": {"types": {}, "units": []}}
+
+
+def _catalog_path():
+    return _work_dir("catalog.json")
+
+
+def _load_catalog(rebuild=False):
+    """Every object type in the game (objcatalog.py), built once into the work
+    folder; fills the library list."""
+    path = _catalog_path()
+    if rebuild or not os.path.isfile(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        _run("objcatalog", "--disc", _disc_path(), "--mods", _mods_dir(), "--out", path)
+    if not _read_catalog():
+        return _CATALOG["data"]
+    _fill_library(bpy.context.scene)
+    return _CATALOG["data"]
+
+
+def _read_catalog():
+    path = _catalog_path()
+    if not os.path.isfile(path):
+        return False
+    mtime = os.path.getmtime(path)
+    if _CATALOG["path"] != path or _CATALOG["mtime"] != mtime:
+        with open(path) as f:
+            _CATALOG.update(path=path, mtime=mtime, data=json.load(f))
+    return True
+
+
+def _types():
+    if _CATALOG["path"] is None and _game_dir():
+        try:
+            _read_catalog()            # e.g. after reopening a saved .blend
+        except (OSError, ValueError):
+            pass
+    return _CATALOG["data"].get("types", {})
+
+
+def _kind(typ):
+    if typ in MARKERS:
+        return "marker"
+    e = _types().get(typ)
+    return e["kind"] if e else "object"
+
+
+def _fill_library(scene):
+    order = {k: i for i, (k, _, _, _) in enumerate(KINDS)}
+    lib = scene.rewr_library
+    lib.clear()
+    for typ, e in sorted(_types().items(), key=lambda kv: (order.get(kv[1]["kind"], 9), kv[0])):
+        it = lib.add()
+        it.name = typ
+        it.kind = e["kind"]
+        it.count = e["count"]
+    scene.rewr_library_index = min(scene.rewr_library_index, max(len(lib) - 1, 0))
+
+
+def _type_colour(typ):
+    """Raziel green, effects white, markers grey; every other type its own colour."""
+    kind = _kind(typ)
+    if kind in ("start", "effect", "marker"):
+        return KIND_COLOUR[kind]
+    import colorsys
+    import zlib
+    h = zlib.crc32(typ.encode())
+    hue = (h % 1000) / 1000.0
+    if 0.22 < hue < 0.42:          # keep clear of Raziel's green
+        hue = 0.42 + (hue - 0.22) * 1.5
+    return colorsys.hsv_to_rgb(hue % 1.0, 0.55 + (h >> 10) % 30 / 100.0, 0.95)
+
+
+def _type_material(typ):
+    kind = _kind(typ)
+    name = "rewr %s" % (kind if kind in ("start", "effect", "marker") else typ)
+    m = bpy.data.materials.get(name)
+    if m is None:
+        m = bpy.data.materials.new(name)
+        m.use_nodes = True
+        bsdf = next((n for n in m.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+        col = tuple(_type_colour(typ)) + (1.0,)
+        if bsdf is not None:
+            bsdf.inputs["Base Color"].default_value = col
+            bsdf.inputs["Roughness"].default_value = 0.8
+            # a little glow, so dark corners don't hide them
+            if "Emission Color" in bsdf.inputs:
+                bsdf.inputs["Emission Color"].default_value = col
+                bsdf.inputs["Emission Strength"].default_value = 0.25
+        m.diffuse_color = col
+    return m
+
+
+def _type_mesh(typ):
+    """The type's model (its first model in its rest pose), with a pointer on the
+    ground in front of it; a small diamond for things with nothing to see."""
+    name = "rewr model %s" % typ
+    me = bpy.data.meshes.get(name)
+    if me is not None:
+        return me
+    kind = _kind(typ)
+    e = _types().get(typ) or {}
+    m = e.get("model")
+    verts, faces = [], []
+    if m and len(m["faces"]) >= 2:
+        verts = [(x * SCALE, y * SCALE, z * SCALE) for x, y, z in m["verts"]]
+        faces = [tuple(f) for f in m["faces"]]
+        front = min(0.0, min(v[1] for v in verts))
+        size = 1.0
+    else:
+        r, h = (0.12, 0.12) if kind == "marker" else (0.25, 0.3)
+        verts = [(r, 0, h), (-r, 0, h), (0, r, h), (0, -r, h), (0, 0, h + r), (0, 0, h - r)]
+        faces = [(0, 2, 4), (2, 1, 4), (1, 3, 4), (3, 0, 4), (2, 0, 5), (1, 2, 5), (3, 1, 5), (0, 3, 5)]
+        front = -r
+        size = 0.5 if kind == "marker" else 1.0
+    # models face -Y: the pointer shows where the object looks
+    b = len(verts)
+    verts += [(0, front - 0.7 * size, 0.02), (-0.25 * size, front - 0.15 * size, 0.02),
+              (0.25 * size, front - 0.15 * size, 0.02)]
+    faces.append((b, b + 2, b + 1))
+    me = bpy.data.meshes.new(name)
+    me.from_pydata(verts, [], faces)
+    me.update()
+    me.materials.append(_type_material(typ))
+    return me
+
+
+def _make_intro(collection, typ, uid, pos, yaw):
+    o = bpy.data.objects.new(typ, _type_mesh(typ))
+    collection.objects.link(o)
+    o.location = pos
+    o.rotation_euler = (0.0, 0.0, yaw)
+    o["rewr_type"] = typ
+    o["rewr_uid"] = uid
+    o["rewr_pos"] = tuple(pos)
+    o.lock_rotation = (True, True, False)       # the game keeps their tilt; turn them around Z
+    o.lock_scale = (True, True, True)
+    o.show_name = _kind(typ) != "marker"
+    o.color = tuple(_type_colour(typ)) + (1.0,)
+    return o
+
+
+def _read_intros_obj(path):
+    """[(UniqueID, type, position, yaw)] from leveldump's intros OBJ: each arrow's
+    first vertex is the position, its second the tip (rotation 0 points along +Y)."""
+    objs, cur = [], None
+    with open(path) as f:
+        for line in f:
+            if line.startswith("o "):
+                cur = [line[2:].strip(), []]
+                objs.append(cur)
+            elif line.startswith("v ") and cur is not None and len(cur[1]) < 2:
+                cur[1].append(tuple(float(v) for v in line.split()[1:4]))
+    out = []
+    for name, v in objs:
+        m = INTRO.match(name)
+        if m and len(v) == 2:
+            dx, dy = v[1][0] - v[0][0], v[1][1] - v[0][1]
+            # types are matched without case ("Hunter" in one unit, "hunter" in another)
+            out.append((int(m.group(1)), m.group(2).lower(), v[0], math.atan2(-dx, dy)))
+    return out
+
+
+def _write_intros_obj(path, objects):
+    """The objects as levelpatch.py reads intros: "intro_<UniqueID>_<type>" for the
+    unit's own (a copy of one gets a ".001": a new intro copied from it, which
+    keeps the original's settings), "intro_new_<type>" for one from the library."""
+    keep = {}
+    for o in objects:
+        uid = int(o.get("rewr_uid", 0))
+        if uid:
+            orig = Vector(o.get("rewr_pos", (0, 0, 0)))
+            d = (o.matrix_world.translation - orig).length
+            if uid not in keep or d < keep[uid][0]:
+                keep[uid] = (d, o)
+    dups = {}
+    lines = ["# intros written by the rewraithed Blender add-on"]
+    for o in objects:
+        typ = o["rewr_type"]
+        uid = int(o.get("rewr_uid", 0))
+        if uid and keep[uid][1] is o:
+            name = "intro_%d_%s" % (uid, typ)
+        elif uid:
+            dups[uid] = dups.get(uid, 0) + 1
+            name = "intro_%d_%s.%03d" % (uid, typ, dups[uid])
+        else:
+            name = "intro_new_%s" % typ
+        p = o.matrix_world.translation
+        a = o.matrix_world.to_euler("XYZ").z
+        tip = p + Vector((-math.sin(a), math.cos(a), 0.0)) * 0.6
+        lines += ["o " + name, "v %.4f %.4f %.4f" % tuple(p), "v %.4f %.4f %.4f" % tuple(tip)]
+    with open(path, "w", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def _drop_to_floor(context, o):
+    """Put the object on the visible terrain under it; False if there is none."""
+    origin = o.matrix_world.translation + Vector((0, 0, 0.5))
+    best = None
+    for t in context.view_layer.objects:
+        if not t.get("rewr_terrain") or t.type != "MESH" or not t.visible_get():
+            continue
+        inv = t.matrix_world.inverted()
+        lo = inv @ origin
+        ld = (inv.to_3x3() @ Vector((0, 0, -1))).normalized()
+        hit, loc, _, _ = t.ray_cast(lo, ld, distance=500.0)
+        if hit:
+            z = (t.matrix_world @ loc).z
+            if best is None or z > best:
+                best = z
+    if best is None:
+        return False
+    o.location.z = best
+    return True
+
+
+def _apply_snap(context):
+    s = context.scene
+    ts = s.tool_settings
+    if s.rewr_snap == "OFF":
+        ts.use_snap = False
+    elif s.rewr_snap == "GRID":
+        ts.use_snap = True
+        ts.snap_elements = {"INCREMENT"}
+        ts.use_snap_grid_absolute = True
+        ts.use_snap_translate = ts.use_snap_rotate = True
+        ts.snap_angle_increment_3d = math.radians(15)
+    else:
+        ts.use_snap = True
+        ts.snap_elements = {"FACE_PROJECT"}
+        ts.use_snap_align_rotation = False
+        ts.use_snap_translate = True
+    screen = context.screen
+    for area in (screen.areas if screen else []):
+        if area.type == "VIEW_3D":
+            ov = area.spaces.active.overlay
+            ov.grid_scale = s.rewr_grid
+            ov.grid_subdivisions = 1
+
+
+def _snap_update(self, context):
+    _apply_snap(context)
+
+
 def open_unit(context, unit):
     """Export `unit` (as it is now in the game: the mods folder's copy if
     there) and load it into the scene. Returns (ok, message)."""
@@ -379,6 +643,7 @@ def open_unit(context, unit):
     if code or not os.path.isfile(os.path.join(out_dir, unit + "_material.obj")):
         return False, "Could not open %s (see the %s text)" % (unit, LOG_NAME)
 
+    _load_catalog()
     _clear_editor_scene()
     root = _collection(scene, "Rewraithed: " + unit)
     root["rewraithed"] = True
@@ -387,23 +652,30 @@ def open_unit(context, unit):
         c = _collection(scene, _col_name(unit, part), root)
         c["rewraithed"] = True
         cols[part] = c
-    _import_obj(os.path.join(out_dir, unit + "_material.obj"), cols["material"], context, True)
-    _import_obj(os.path.join(out_dir, unit + "_spectral.obj"), cols["spectral"], context, True)
-    if os.path.isfile(os.path.join(out_dir, unit + "_intros.obj")):
-        _import_obj(os.path.join(out_dir, unit + "_intros.obj"), cols["objects"], context)
+    terrain = _import_obj(os.path.join(out_dir, unit + "_material.obj"), cols["material"], context, True)
+    terrain += _import_obj(os.path.join(out_dir, unit + "_spectral.obj"), cols["spectral"], context, True)
+    terrain_mats = set()
+    for o in terrain:
+        o["rewr_terrain"] = True
+        terrain_mats.update(s.material for s in o.material_slots if s.material)
+    for m in terrain_mats:
+        _game_look(m)
+
+    intros = []
+    path = os.path.join(out_dir, unit + "_intros.obj")
+    if os.path.isfile(path):
+        intros = _read_intros_obj(path)
+    for uid, typ, pos, yaw in intros:
+        _make_intro(cols["objects"], typ, uid, pos, yaw)
 
     scene.rewr_open_unit = unit
-    scene.rewr_templates = ""
+    scene["rewr_unit_types"] = ",".join(sorted({typ for _, typ, _, _ in intros}))
     scene["rewr_fp_material"] = _fingerprint(cols["material"].objects)
     scene["rewr_fp_spectral"] = _fingerprint(cols["spectral"].objects)
     _set_realm(scene, scene.rewr_realm)
-    for m in bpy.data.materials:
-        _game_look(m)
-    for o in cols["objects"].objects:
-        o.show_name = True          # "intro_5770_hunter": what each arrow is
-        o.show_in_front = True
+    _apply_snap(context)
     _show_textured(context, list(cols["material"].objects))
-    in_mods =os.path.isfile(os.path.join(_mods_dir(), *_level_path(unit).split("\\")))
+    in_mods = os.path.isfile(os.path.join(_mods_dir(), *_level_path(unit).split("\\")))
     return True, "Opened %s (%s)" % (unit, "your edited version" if in_mods else "as on the disc")
 
 
@@ -442,48 +714,65 @@ class REWR_OT_open_unit(_ToolOperator, bpy.types.Operator):
         return {"FINISHED"} if ok else {"CANCELLED"}
 
 
-class REWR_OT_add_template_unit(_ToolOperator, bpy.types.Operator):
-    """Bring in another unit's objects and enemies, to copy into this unit: move (M) or
-    duplicate (Shift+D, then M) an arrow into this unit's objects collection"""
-    bl_idname = "rewraithed.add_template_unit"
-    bl_label = "Bring objects from unit"
+class REWR_OT_add_object(_ToolOperator, bpy.types.Operator):
+    """Put the object picked in the library at the 3D cursor (Shift+right click on the
+    ground places the cursor), standing on the floor under it"""
+    bl_idname = "rewraithed.add_object"
+    bl_label = "Add at the 3D cursor"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        s = context.scene
+        col = bpy.data.collections.get(_col_name(s.rewr_open_unit, "objects")) if s.rewr_open_unit else None
+        if col is None:
+            self.report({"ERROR"}, "Open a unit first")
+            return {"CANCELLED"}
+        if not 0 <= s.rewr_library_index < len(s.rewr_library):
+            self.report({"ERROR"}, "Pick an object in the library first")
+            return {"CANCELLED"}
+        typ = s.rewr_library[s.rewr_library_index].name
+        if context.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        o = _make_intro(col, typ, 0, s.cursor.location.copy(), 0.0)
+        context.view_layer.update()
+        on_floor = _drop_to_floor(context, o)
+        for x in context.view_layer.objects:
+            x.select_set(False)
+        o.select_set(True)
+        context.view_layer.objects.active = o
+        self.report({"INFO"}, "Added %s%s; G moves it, R turns it" % (
+            typ, "" if on_floor else " (no floor under the cursor)"))
+        return {"FINISHED"}
+
+
+class REWR_OT_drop_to_floor(bpy.types.Operator):
+    """Stand the selected objects on the terrain under them (the realm you see)"""
+    bl_idname = "rewraithed.drop_to_floor"
+    bl_label = "Drop to floor"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        sel = [o for o in context.selected_objects if o.get("rewr_type")]
+        if not sel:
+            self.report({"ERROR"}, "Select one or more objects of the unit first")
+            return {"CANCELLED"}
+        missed = [o.name for o in sel if not _drop_to_floor(context, o)]
+        if missed:
+            self.report({"WARNING"}, "No floor under: " + ", ".join(missed))
+        return {"FINISHED"}
+
+
+class REWR_OT_refresh_library(_ToolOperator, bpy.types.Operator):
+    """Read the list of every object type in the game again (after installing new units)"""
+    bl_idname = "rewraithed.refresh_library"
+    bl_label = "Refresh library"
 
     def execute(self, context):
         if not self._ready():
             return {"CANCELLED"}
-        scene = context.scene
-        unit = scene.rewr_open_unit
-        src = scene.rewr_template_unit.strip().lower()
-        if not unit:
-            self.report({"ERROR"}, "Open a unit first")
-            return {"CANCELLED"}
-        if not re.fullmatch(r"[a-z]+[0-9]+", src) or src == unit:
-            self.report({"ERROR"}, "Give another unit's name, e.g. city4")
-            return {"CANCELLED"}
-        out_dir = _work_dir("templates", src)
-        shutil.rmtree(out_dir, ignore_errors=True)
-        os.makedirs(out_dir, exist_ok=True)
-        code, out = _run("leveldump", "--disc", _disc_path(), "--mods", _mods_dir(), src,
-                         "--obj", out_dir, "--no-textures")
-        path = os.path.join(out_dir, src + "_intros.obj")
-        if code or not os.path.isfile(path):
-            self.report({"ERROR"}, "Could not read %s (see the %s text)" % (src, LOG_NAME))
-            return {"CANCELLED"}
-        root = bpy.data.collections.get("Rewraithed: " + unit)
-        name = "objects from %s" % src
-        _remove_collection(name)
-        c = _collection(scene, name, root)
-        c["rewraithed"] = True
-        new = _import_obj(path, c, context)
-        # keep only placeable things: markers and camera paths belong to their unit
-        for o in list(new):
-            if o.name.endswith(("_marker", "_campath", "_raziel")):
-                bpy.data.objects.remove(o, do_unlink=True)
-        tmpl = [t for t in scene.rewr_templates.split(",") if t]
-        if src not in tmpl:
-            tmpl.append(src)
-        scene.rewr_templates = ",".join(tmpl)
-        self.report({"INFO"}, "%d objects from %s; they sit where they are in %s" % (len(c.objects), src, src))
+        _log("Reading every object type in the game", clear=True)
+        _load_catalog(rebuild=True)
+        self.report({"INFO"}, "%d object types" % len(_types()))
         return {"FINISHED"}
 
 
@@ -508,14 +797,26 @@ class REWR_OT_install(_ToolOperator, bpy.types.Operator):
             self.report({"ERROR"}, "The unit's collections are missing; open the unit again")
             return {"CANCELLED"}
         _log("Installing %s" % unit, clear=True)
+        _load_catalog()
 
         edit_dir = os.path.join(work, "edited")
         os.makedirs(edit_dir, exist_ok=True)
         mat_obj = os.path.join(edit_dir, unit + "_material.obj")
         intros_obj = os.path.join(edit_dir, unit + "_intros.obj")
         _export_obj(mat_obj, [o for o in mat_col.all_objects if o.type == "MESH"], context, True, mat_col)
-        arrows = [o for o in obj_col.all_objects if o.type == "MESH" and o.name.startswith("intro_")]
-        _export_obj(intros_obj, arrows, context, False, obj_col)
+        placed = [o for o in obj_col.all_objects if o.get("rewr_type")]
+        if not placed:
+            self.report({"ERROR"}, "The unit has no objects left; keep at least one")
+            return {"CANCELLED"}
+        _write_intros_obj(intros_obj, placed)
+        # an object type new to the unit is copied from a unit that has one
+        have = set(scene.get("rewr_unit_types", "").split(","))
+        templates = []
+        for o in placed:
+            e = _types().get(o["rewr_type"])
+            if not o.get("rewr_uid") and o["rewr_type"] not in have and e and e.get("template") \
+                    and e["template"] != unit and e["template"] not in templates:
+                templates.append(e["template"])
 
         spectral_changed = spec_col is not None and \
             _fingerprint(spec_col.objects) != scene.get("rewr_fp_spectral")
@@ -524,8 +825,8 @@ class REWR_OT_install(_ToolOperator, bpy.types.Operator):
         args = ["--disc", _disc_path(), unit, "--from-mods", "--install", _mods_dir(),
                 "--material-obj", mat_obj, "--map", os.path.join(work, unit + "_material.obj.map.json"),
                 "--intros-obj", intros_obj]
-        if scene.rewr_templates:
-            args += ["--intro-templates", scene.rewr_templates]
+        if templates:
+            args += ["--intro-templates", ",".join(templates)]
         code, out = _run("levelpatch", *args)
         problems = _problems(out)
         if code or "not written" in out or "CHECK FAILED" in out:
@@ -551,11 +852,7 @@ class REWR_OT_install(_ToolOperator, bpy.types.Operator):
                     open_unit(context, unit)
                     return {"CANCELLED"}
 
-        templates = scene.rewr_templates
         ok, msg = open_unit(context, unit)        # reload: the next install needs fresh vertex maps
-        if templates:
-            _log("(objects brought from %s are cleared after installing; bring them again to copy more)"
-                 % templates)
         if problems:
             self.report({"WARNING"}, "Installed %s, with warnings: %s (see the %s text)" % (
                 unit, problems[0], LOG_NAME))
@@ -687,12 +984,28 @@ class REWR_PT_panel(bpy.types.Panel):
 
         if s.rewr_open_unit:
             box = lay.box()
-            box.label(text="2. Objects from another unit", icon="GHOST_ENABLED")
+            box.label(text="2. Objects", icon="GHOST_ENABLED")
+            box.prop(s, "rewr_lib_kind", text="")
+            box.template_list("REWR_UL_library", "", s, "rewr_library", s, "rewr_library_index", rows=8)
+            if 0 <= s.rewr_library_index < len(s.rewr_library):
+                typ = s.rewr_library[s.rewr_library_index].name
+                e = _types().get(typ, {})
+                col = box.column(align=True)
+                units = sorted(e.get("units", {}).items(), key=lambda kv: -kv[1])
+                col.label(text="%s: %d in the game, in %d units" % (typ, e.get("count", 0), len(units)))
+                if units:
+                    col.label(text="For example in " + ", ".join(u for u, _ in units[:4]))
+                if e.get("deps"):
+                    col.label(text="Brings along: " + ", ".join(e["deps"]))
+                box.operator("rewraithed.add_object", icon="ADD")
             row = box.row(align=True)
-            row.prop(s, "rewr_template_unit", text="")
-            row.operator("rewraithed.add_template_unit", text="Bring")
-            if s.rewr_templates:
-                box.label(text="From: " + s.rewr_templates.replace(",", ", "))
+            row.label(text="Snap")
+            row.prop(s, "rewr_snap", expand=True)
+            if s.rewr_snap == "GRID":
+                box.prop(s, "rewr_grid")
+            row = box.row(align=True)
+            row.operator("rewraithed.drop_to_floor", icon="TRIA_DOWN_BAR")
+            row.operator("rewraithed.refresh_library", text="", icon="FILE_REFRESH")
 
             box = lay.box()
             box.label(text="3. Into the game", icon="PLAY")
@@ -710,8 +1023,39 @@ class REWR_PT_panel(bpy.types.Panel):
         lay.operator("rewraithed.show_log", icon="TEXT")
 
 
-CLASSES = (RewraithedPreferences, REWR_OT_open_unit, REWR_OT_add_template_unit, REWR_OT_install,
-           REWR_OT_check_budget, REWR_OT_launch, REWR_OT_revert, REWR_OT_show_log, REWR_PT_panel)
+class REWR_LibraryItem(bpy.types.PropertyGroup):
+    kind: StringProperty()
+    count: IntProperty()
+
+
+class REWR_UL_library(bpy.types.UIList):
+    """Every object type in the game; type in the search box to find one"""
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index=0):
+        row = layout.row()
+        row.label(text=item.name, icon=KIND_ICON.get(item.kind, "OBJECT_DATA"))
+        sub = row.row()
+        sub.alignment = "RIGHT"
+        sub.label(text="%d" % item.count)
+
+    def filter_items(self, context, data, propname):
+        items = getattr(data, propname)
+        kind = context.scene.rewr_lib_kind
+        want = self.filter_name.lower()
+        flags = []
+        for it in items:
+            ok = (kind == "ALL" or it.kind == kind) and (not want or want in it.name.lower())
+            flags.append(self.bitflag_filter_item if ok else 0)
+        return flags, []
+
+
+CLASSES = (RewraithedPreferences, REWR_LibraryItem, REWR_UL_library, REWR_OT_open_unit, REWR_OT_add_object,
+           REWR_OT_drop_to_floor, REWR_OT_refresh_library, REWR_OT_install, REWR_OT_check_budget,
+           REWR_OT_launch, REWR_OT_revert, REWR_OT_show_log, REWR_PT_panel)
+
+SCENE_PROPS = ("rewr_unit", "rewr_open_unit", "rewr_realm", "rewr_library", "rewr_library_index",
+               "rewr_lib_kind", "rewr_snap", "rewr_grid", "rewr_play_material", "rewr_play_swim",
+               "rewr_play_skipcutscene", "rewr_play_vramlog")
 
 
 def register():
@@ -720,9 +1064,19 @@ def register():
     S = bpy.types.Scene
     S.rewr_unit = StringProperty(name="Unit", default="city9", description="Unit to open, e.g. city9")
     S.rewr_open_unit = StringProperty(name="Open unit")
-    S.rewr_template_unit = StringProperty(name="From unit", default="city4",
-                                          description="Unit to copy objects and enemies from")
-    S.rewr_templates = StringProperty(name="Template units")
+    S.rewr_library = CollectionProperty(type=REWR_LibraryItem)
+    S.rewr_library_index = IntProperty(name="Object type")
+    S.rewr_lib_kind = EnumProperty(
+        name="Show", description="Which kind of object the library lists",
+        items=[("ALL", "Everything", "Every object type", "NONE", 0)] +
+              [(k, label, label, icon, i + 1) for i, (k, _, icon, label) in enumerate(KINDS) if k != "marker"])
+    S.rewr_snap = EnumProperty(
+        name="Snap", update=_snap_update, default="GRID",
+        items=[("OFF", "Off", "Move freely"),
+               ("GRID", "Grid", "Moving snaps to the grid, turning to 15 degree steps"),
+               ("SURFACE", "Surface", "Moving sticks to the ground and walls under the mouse")])
+    S.rewr_grid = FloatProperty(name="Grid size (m)", default=0.5, min=0.05, max=10.0, update=_snap_update,
+                                description="Grid spacing; 1 m is 100 game units")
     S.rewr_realm = EnumProperty(name="Realm", items=[("MATERIAL", "Material", "Show the material realm"),
                                                      ("SPECTRAL", "Spectral", "Show the spectral realm")],
                                 update=_realm_update)
@@ -735,8 +1089,7 @@ def register():
 
 def unregister():
     S = bpy.types.Scene
-    for p in ("rewr_unit", "rewr_open_unit", "rewr_template_unit", "rewr_templates", "rewr_realm",
-              "rewr_play_material", "rewr_play_swim", "rewr_play_skipcutscene", "rewr_play_vramlog"):
+    for p in SCENE_PROPS:
         if hasattr(S, p):
             delattr(S, p)
     for c in reversed(CLASSES):

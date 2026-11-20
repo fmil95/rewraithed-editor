@@ -420,6 +420,24 @@ about objects spawned during play, or about types still loaded from a unit you
 just left. Start the port with `-vramlog` to see the real placements in `vram.log`
 next to the executable, including any type that got no block.
 
+### Every object type in the game (objcatalog.py)
+
+```
+python objcatalog.py --disc <path>/KAIN2.img --mods <exe folder>/mods --out catalog.json
+```
+
+Walks every unit reachable through portals (369 units from `under1` and `city9`)
+and lists the 375 object types they place, as JSON: how many of each there are
+and in which units, a unit to copy one from (one that loads the type itself and
+has an intro of it, for `--intro-templates`), its kind (creature, boss, object,
+effect, Raziel's start), its video-memory block, the types it brings along, and
+its first model in its rest pose (each segment's vertices plus the pivots of the
+segment and its parents; models face -Y). The Blender add-on uses it for its
+object library and to draw each object as its model.
+
+Intro type names aren't always spelled the same (`Hunter` in `tower1`, `hunter`
+elsewhere); `intros.py` matches them without case.
+
 ## Recompiling BSP trees (bspbuild.py)
 
 `bspbuild.py` rebuilds every non-empty BSP tree of a level from its faces:
@@ -479,6 +497,7 @@ the original, frame for frame, including Raziel being stopped by a pillar.
 | `newtex.py` | new images: PNG reading, 16-colour reduction, placing into the `.crm` |
 | `vramspace.py` | which parts of a unit's video memory are used, and free spots |
 | `vrambudget.py` | object video memory: whether every object type near a unit gets its textures |
+| `objcatalog.py` | every object type the game places, with a unit to copy it from and its model |
 | `transform.py` | turning a whole unit by 90, 180 or 270 degrees |
 | `portals.py` | moving, reshaping and adding portals |
 | `newunit.py` | a unit built from nothing: emptied container, generated room, doorway into an existing unit |
