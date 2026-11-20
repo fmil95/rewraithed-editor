@@ -11,7 +11,7 @@ Blender's own Python, so nothing else needs installing.
 bl_info = {
     "name": "Rewraithed level editor",
     "author": "rewraithed",
-    "version": (0, 2, 1),
+    "version": (0, 2, 2),
     "blender": (4, 2, 0),
     "location": "3D View > Sidebar > Rewraithed",
     "description": "Edit Soul Reaver prototype levels for the rewraithed PC port",
@@ -197,17 +197,18 @@ def _remove_collection(name):
     c = bpy.data.collections.get(name)
     if c is None:
         return
-    for o in list(c.all_objects):
+    for ch_name in [ch.name for ch in c.children]:
+        _remove_collection(ch_name)
+    for o in list(c.objects):
         bpy.data.objects.remove(o, do_unlink=True)
-    for ch in list(c.children):
-        _remove_collection(ch.name)
     bpy.data.collections.remove(c)
 
 
 def _clear_editor_scene():
-    for c in list(bpy.data.collections):
-        if c.get("rewraithed"):
-            _remove_collection(c.name)
+    # by name: removing a unit's collection removes its sub-collections too, and a
+    # Python reference to one of those would then be dead
+    for name in [c.name for c in bpy.data.collections if c.get("rewraithed")]:
+        _remove_collection(name)
     for _ in range(3):
         bpy.data.orphans_purge(do_local_ids=True, do_linked_ids=True, do_recursive=True)
 
