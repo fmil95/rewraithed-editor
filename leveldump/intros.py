@@ -285,6 +285,32 @@ def copy_intro_data(src, off, dest_unit_id):
     return bytes(out), dropped
 
 
+# Intro.flags 0x400: the monster does not come back once killed. Monsters
+# whose data holds command 9 (MON_ProcessIntro) are otherwise regenerated:
+# after the seconds given there (MONAPI_AddToGenerator), or when the unit
+# loads again. With the flag, MON_KillMonster marks them dead for good and
+# the generator drops them (MONAPI.c). Level scripts can also set or clear
+# it (event attribute 138).
+NO_REGEN = 0x400
+
+
+def set_no_regen(data, types):
+    """Set NO_REGEN on the intros of the given object types. Returns (new
+    bytes, report lines)."""
+    L = parse_level(data)
+    d = Drm(data)
+    wanted = {t.strip().lower() for t in types if t.strip()}
+    lines = []
+    for it in L.terrain.intros:
+        if it.name.lower() in wanted:
+            flags = d.s32(it.offset + 0x2C)
+            d.pack("i", it.offset + 0x2C, flags | NO_REGEN)
+            lines.append("%s (UniqueID %d) no longer respawns" % (it.name, it.UniqueID))
+    if not lines:
+        lines.append("no intro of type %s" % ", ".join(sorted(wanted)))
+    return d.to_bytes(), lines
+
+
 def add_object_type(data, typ):
     """Append an object type to Level.objectNameList (if missing). Returns
     (new bytes, whether it was added)."""

@@ -183,6 +183,8 @@ def main(argv=None):
                     help="also load these object types (copied from UNIT), e.g. a hunter's weapon fthrow:city4")
     ap.add_argument("--remove-objects", default="", metavar="TYPE,...",
                     help="stop loading these object types (after deleting their intros), e.g. hunter,fthrow")
+    ap.add_argument("--no-regen", default="", metavar="TYPE,...",
+                    help="these monsters no longer respawn once killed (intro flag 0x400), e.g. wallcr")
     ap.add_argument("--intro-templates", default="", metavar="UNITS",
                     help="comma-separated units to copy new intro types from (with --disc), e.g. city9")
     ap.add_argument("--hill", nargs=4, type=float, metavar=("X", "Y", "RADIUS", "HEIGHT"),
@@ -249,6 +251,12 @@ def main(argv=None):
         for typ in args.remove_objects.split(","):
             data, removed = intros.remove_object_type(data, typ.strip())
             print("%s %s the unit's object list" % (typ.strip(), "removed from" if removed else "not in"))
+
+    if args.no_regen:
+        import intros
+        data, lines = intros.set_no_regen(data, args.no_regen.split(","))
+        for line in lines:
+            print(line)
 
     if args.material_obj and changes_layout(data, args.material_obj,
                                             args.map or _default_map(args.material_obj, unit, "material")):
