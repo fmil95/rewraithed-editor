@@ -65,6 +65,13 @@ patch with `levelpatch.py ... --install <exe folder>/mods --from-mods`. Both the
 units and object files from the mods folder where they are there, like the port does.
 The Blender add-on (`../blender/`) works this way.
 
+A prototype's maps, as the port's launcher extracts them (`proto/<date>/areas`), are
+read with `--layer`: `leveldump.py --mods proto/<date>/mods --layer proto/<date>/areas
+--layer mods` and the same `--install`/`--layer` for `levelpatch.py`, in the order the
+port serves them with `-earlierareas <date>` (that prototype's own mods folder first,
+then its maps, then the mods folder). `--template-mods mods` makes `--intro-templates`
+read the template units from the main game.
+
 `--hill X Y RADIUS HEIGHT [--tint R G B]` is a scripted test edit that needs no
 Blender. Every output is re-read and checked before it's written. An OBJ
 exported by Blender without changes patches back to a byte-identical level.

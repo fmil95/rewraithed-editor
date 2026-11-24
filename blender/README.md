@@ -21,6 +21,12 @@ folder next to `rewraithed.exe`; the game disc is never changed.
 
 ### 1. Open it
 
+**Game Version** picks whose units you edit: **Main (July 1999)**, the port's own game,
+or one of the prototypes the launcher extracted (*Extract Earlier Areas*), by date. The
+unit box then lists that version's units, and **Play this unit** starts the game with
+that prototype's maps. Edits of a prototype's units go in its own folder
+(`proto/<date>/mods`), so they never mix with the main game's.
+
 Click the unit box to pick from every unit in the game (type part of a name, like
 `under`, to narrow the list), then press **Open**. This clears what the
 editor loaded before, so unsaved Blender changes to the previous unit are lost. If you
@@ -126,7 +132,8 @@ Rules that keep the level loading:
 ## Where things are
 
 * Your edited units: `<game folder>/mods/kain2/area/<area>/bin/<unit>.drm` (and `.crm`
-  for textures). Object files copied for new enemies go to `mods/kain2/object/`.
+  for textures). Object files copied for new enemies go to `mods/kain2/object/`. A
+  prototype's edits: `<game folder>/proto/<date>/mods/`, laid out the same way.
 * The editor's working files: `<game folder>/editor-work/` (safe to delete).
 * Back up the `mods` folder to keep a version of your work, and empty it to go back to
   the original game.

@@ -192,6 +192,11 @@ def main(argv=None):
     ap.add_argument("--tint", nargs=3, type=int, metavar=("R", "G", "B"), help="colour the --hill towards this")
     ap.add_argument("-o", "--output", help="output .drm")
     ap.add_argument("--install", metavar="MODS_DIR", help="write to MODS_DIR/kain2/area/<area>/bin/<unit>.drm")
+    ap.add_argument("--template-mods", metavar="MODS_DIR",
+                    help="read the --intro-templates units from MODS_DIR and the disc only, not from "
+                         "--install or --layer (a prototype's unit taking types from the main game's units)")
+    ap.add_argument("--layer", metavar="DIR", action="append", default=[],
+                    help="also read files from DIR, after --install (a prototype's maps: proto/<date>/areas)")
     ap.add_argument("--from-mods", action="store_true",
                     help="start from the files already in --install (earlier edits) instead of the disc's")
     args = ap.parse_args(argv)
@@ -199,6 +204,7 @@ def main(argv=None):
         if not args.install:
             ap.error("--from-mods needs --install")
         disc.OVERLAY = args.install
+    disc.LAYERS[:] = args.layer
 
     if args.disc:
         if not args.unit:
@@ -219,7 +225,10 @@ def main(argv=None):
         if args.intro_templates:
             if not args.disc:
                 ap.error("--intro-templates needs --disc")
-            bf = disc.BigFile(args.disc)
+            if args.template_mods:
+                bf = disc.BigFile(args.disc, mods=args.template_mods, layers=False)
+            else:
+                bf = disc.BigFile(args.disc)
             tmpl = [lvl.parse_level(bf.read_level(u.strip())) for u in args.intro_templates.split(",") if u.strip()]
         scale = 0.01
         data, lines, new_types = intros.apply_intros(data, args.intros_obj, scale, tmpl)

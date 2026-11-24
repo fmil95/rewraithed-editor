@@ -218,13 +218,12 @@ class Source:
         self._exists = {}
 
     def _mod(self, path):
-        if not self.mods:
-            return None
-        p = os.path.join(self.mods, *path.strip("\\").split("\\"))
-        if os.path.exists(p):
-            with open(p, "rb") as f:
-                return f.read()
-        return None
+        if self.mods:
+            p = os.path.join(self.mods, *path.strip("\\").split("\\"))
+            if os.path.exists(p):
+                with open(p, "rb") as f:
+                    return f.read()
+        return disc.read_layers(path)
 
     def level(self, unit):
         unit = unit.lower()
@@ -440,12 +439,15 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--disc", required=True)
     ap.add_argument("--install", metavar="MODS_DIR", help="read edited units and objects from the mods folder")
+    ap.add_argument("--layer", metavar="DIR", action="append", default=[],
+                    help="also read files from DIR, after --install (a prototype's maps: proto/<date>/areas)")
     ap.add_argument("--survey", action="store_true",
                     help="walk every unit reachable from the given ones and rank their groups")
     ap.add_argument("--top", type=int, default=15)
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("units", nargs="+")
     args = ap.parse_args(argv)
+    disc.LAYERS[:] = args.layer
     src = Source(args.disc, args.install)
     if args.survey:
         rows = survey(src, args.units)

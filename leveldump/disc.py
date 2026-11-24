@@ -167,10 +167,27 @@ def level_path(unit):
 # that an edit starts from the unit as it is now in the game.
 OVERLAY = None
 
+# More folders laid out the same way, read after the mods folder and before
+# the bigfile, in this order: a prototype's maps (proto\<date>\areas, as the
+# port's launcher extracts them) and the mods folder under its own edits
+# (--layer). As the port serves them when that prototype is loaded.
+LAYERS = []
+
+
+def read_layers(path):
+    """The file at game path `path` from the first LAYERS folder that has it, or None."""
+    for folder in LAYERS:
+        p = os.path.join(folder, *path.strip("\\").split("\\"))
+        if os.path.isfile(p):
+            with open(p, "rb") as f:
+                return f.read()
+    return None
+
 
 class BigFile:
-    def __init__(self, image_path, name="BIGFILE.DAT", mods=None):
+    def __init__(self, image_path, name="BIGFILE.DAT", mods=None, layers=True):
         self.mods = mods
+        self.layers = layers      # False: only `mods` and the bigfile (not LAYERS)
         self.cd = CdImage(image_path)
         self.lba, self.size = self.cd.find(name)
         num = struct.unpack("<i", self.read(0, 4))[0]
@@ -215,6 +232,9 @@ class BigFile:
             if os.path.isfile(p):
                 with open(p, "rb") as f:
                     return f.read()
+        data = read_layers(path) if self.layers else None
+        if data is not None:
+            return data
         pos, length = self.lookup(path, unit)
         return self.read(pos, length)
 

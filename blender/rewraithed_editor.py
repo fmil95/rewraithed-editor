@@ -11,7 +11,7 @@ Blender's own Python, so nothing else needs installing.
 bl_info = {
     "name": "Rewraithed level editor",
     "author": "rewraithed",
-    "version": (0, 3, 3),
+    "version": (0, 4, 0),
     "blender": (4, 2, 0),
     "location": "3D View > Sidebar > Rewraithed",
     "description": "Edit Soul Reaver prototype levels for the rewraithed PC port",
@@ -91,12 +91,94 @@ def _tools_dir():
     return here if os.path.isfile(os.path.join(here, "levelpatch.py")) else ""
 
 
-def _mods_dir():
+MAIN = "MAIN"          # the port's own game: the disc in the game folder
+
+
+def _main_mods_dir():
     return os.path.join(_game_dir(), "mods")
+
+
+def _proto_dir(*parts):
+    return os.path.join(_game_dir(), "proto", *parts)
+
+
+def _proto_versions():
+    """Dates of the prototypes whose maps the launcher extracted in a level
+    format the game loads (proto/<date>/areas/index.txt, "format 1")."""
+    out = []
+    root = _proto_dir()
+    if not _game_dir() or not os.path.isdir(root):
+        return out
+    for name in sorted(os.listdir(root)):
+        index = os.path.join(root, name, "areas", "index.txt")
+        if os.path.isfile(index):
+            try:
+                with open(index) as f:
+                    if any(line.strip() == "format 1" for line in f):
+                        out.append(name)
+            except OSError:
+                pass
+    return out
+
+
+def _proto_units(date):
+    """[(unit, startable)] of a prototype, from its index."""
+    units = []
+    try:
+        with open(_proto_dir(date, "areas", "index.txt")) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == "unit":
+                    units.append((parts[1].lower(), len(parts) < 3 or parts[2] != "0"))
+    except OSError:
+        pass
+    return units
+
+
+def _ver():
+    """The game version the editor works on: the open unit's, else the one picked."""
+    s = bpy.context.scene
+    if s.rewr_open_unit:
+        return s.get("rewr_open_version", MAIN)
+    return s.rewr_version
+
+
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _ver_label(v):
+    """As the launcher writes them (earlier_date_text): "Jun 18, 1999"."""
+    if v == MAIN:
+        return "Main (July 1999)"
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", v)
+    if m and 1 <= int(m.group(2)) <= 12:
+        return "%s %d, %s" % (MONTHS[int(m.group(2)) - 1], int(m.group(3)), m.group(1))
+    return v
+
+
+def _mods_dir():
+    """Where edits of this version's units go: the mods folder, or a prototype's
+    own (proto/<date>/mods, which the game reads before that prototype's maps)."""
+    v = _ver()
+    return _main_mods_dir() if v == MAIN else _proto_dir(v, "mods")
+
+
+def _layers():
+    """--layer arguments: a prototype's maps, then the mods folder (the order
+    the game serves them in when that prototype is loaded)."""
+    v = _ver()
+    if v == MAIN:
+        return []
+    return ["--layer", _proto_dir(v, "areas"), "--layer", _main_mods_dir()]
 
 
 def _work_dir(*parts):
     return os.path.join(_game_dir(), "editor-work", *parts)
+
+
+def _unit_work(*parts):
+    v = _ver()
+    return _work_dir(*parts) if v == MAIN else _work_dir("proto-" + v, *parts)
 
 
 def _setup_problem():
@@ -406,7 +488,7 @@ def _load_catalog(rebuild=False):
     path = _catalog_path()
     if rebuild or not os.path.isfile(path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        _run("objcatalog", "--disc", _disc_path(), "--mods", _mods_dir(), "--out", path)
+        _run("objcatalog", "--disc", _disc_path(), "--mods", _main_mods_dir(), "--out", path)
     if not _read_catalog():
         return _CATALOG["data"]
     _fill_library(bpy.context.scene)
@@ -450,10 +532,40 @@ def _fill_library(scene):
         it.kind = e["kind"]
         it.count = e["count"]
     scene.rewr_library_index = min(scene.rewr_library_index, max(len(lib) - 1, 0))
+    _fill_units(scene)
+
+
+def _fill_units(scene):
+    """The unit box's list: the units of the version picked."""
     units = scene.rewr_units
     units.clear()
-    for u in sorted(_CATALOG["data"].get("units", []), key=_natural):
+    v = scene.rewr_version
+    if v == MAIN:
+        names = _CATALOG["data"].get("units", [])
+    else:
+        names = [u for u, _ in _proto_units(v)]
+    for u in sorted(set(names), key=_natural):
         units.add().name = u
+    have = {u.name for u in units}
+    if have and scene.rewr_unit not in have:
+        start = [u for u, ok in _proto_units(v) if ok] if v != MAIN else []
+        scene.rewr_unit = next((u for u in ("under1", "city9") if u in have), (start or sorted(have, key=_natural))[0])
+
+
+_VERSION_ITEMS = []      # kept alive: Blender doesn't copy dynamic enum items
+
+
+def _version_items(self, context):
+    items = [(MAIN, _ver_label(MAIN), "The port's own game (the disc in the game folder)")]
+    for d in _proto_versions():
+        items.append((d, _ver_label(d), "The maps of the %s prototype, as the launcher extracted them "
+                                       "(proto/%s/areas)" % (_ver_label(d), d)))
+    _VERSION_ITEMS[:] = items
+    return _VERSION_ITEMS
+
+
+def _version_update(self, context):
+    _fill_units(context.scene)
 
 
 def _natural(name):
@@ -816,16 +928,19 @@ def _draw_labels():
     gpu.state.blend_set("NONE")
 
 
-def open_unit(context, unit):
+def open_unit(context, unit, version=None):
     """Export `unit` (as it is now in the game: the mods folder's copy if
     there) and load it into the scene. Returns (ok, message)."""
     scene = context.scene
     unit = unit.strip().lower()
-    out_dir = _work_dir(unit)
+    old_version = scene.get("rewr_open_version", MAIN)
+    scene["rewr_open_version"] = version = scene.rewr_version if version is None else version
+    out_dir = _unit_work(unit)
     shutil.rmtree(out_dir, ignore_errors=True)
     os.makedirs(out_dir, exist_ok=True)
-    code, out = _run("leveldump", "--disc", _disc_path(), "--mods", _mods_dir(), unit, "--obj", out_dir)
+    code, out = _run("leveldump", "--disc", _disc_path(), "--mods", _mods_dir(), *_layers(), unit, "--obj", out_dir)
     if code or not os.path.isfile(os.path.join(out_dir, unit + "_material.obj")):
+        scene["rewr_open_version"] = old_version
         return False, "Could not open %s (see the %s text)" % (unit, LOG_NAME)
 
     _load_catalog()
@@ -861,7 +976,8 @@ def open_unit(context, unit):
     _apply_snap(context)
     _show_textured(context, list(cols["material"].objects))
     in_mods = os.path.isfile(os.path.join(_mods_dir(), *_level_path(unit).split("\\")))
-    return True, "Opened %s (%s)" % (unit, "your edited version" if in_mods else "as on the disc")
+    return True, "Opened %s, %s (%s)" % (unit, _ver_label(version),
+                                         "your edited version" if in_mods else "as the game has it")
 
 
 def _level_path(unit, ext="drm"):
@@ -1036,7 +1152,7 @@ class REWR_OT_install(_ToolOperator, bpy.types.Operator):
         if not unit:
             self.report({"ERROR"}, "Open a unit first")
             return {"CANCELLED"}
-        work = _work_dir(unit)
+        work = _unit_work(unit)
         mat_col = bpy.data.collections.get(_col_name(unit, "material"))
         spec_col = bpy.data.collections.get(_col_name(unit, "spectral"))
         obj_col = bpy.data.collections.get(_col_name(unit, "objects"))
@@ -1069,11 +1185,13 @@ class REWR_OT_install(_ToolOperator, bpy.types.Operator):
             _fingerprint(spec_col.objects) != scene.get("rewr_fp_spectral")
         material_changed = _fingerprint(mat_col.objects) != scene.get("rewr_fp_material")
 
-        args = ["--disc", _disc_path(), unit, "--from-mods", "--install", _mods_dir(),
+        args = ["--disc", _disc_path(), unit, "--from-mods", "--install", _mods_dir(), *_layers(),
                 "--material-obj", mat_obj, "--map", os.path.join(work, unit + "_material.obj.map.json"),
                 "--intros-obj", intros_obj]
         if templates:
             args += ["--intro-templates", ",".join(templates)]
+            if _ver() != MAIN:          # the library's units are the main game's
+                args += ["--template-mods", _main_mods_dir()]
         code, out = _run("levelpatch", *args)
         problems = _problems(out)
         if code or "not written" in out or "CHECK FAILED" in out:
@@ -1090,16 +1208,16 @@ class REWR_OT_install(_ToolOperator, bpy.types.Operator):
                 spec_obj = os.path.join(edit_dir, unit + "_spectral.obj")
                 _export_obj(spec_obj, [o for o in spec_col.all_objects if o.type == "MESH"], context, False, spec_col)
                 code, out2 = _run("levelpatch", "--disc", _disc_path(), unit, "--from-mods",
-                                  "--install", _mods_dir(), "--spectral-obj", spec_obj,
+                                  "--install", _mods_dir(), *_layers(), "--spectral-obj", spec_obj,
                                   "--spectral-map", os.path.join(work, unit + "_spectral.obj.map.json"))
                 problems += _problems(out2)
                 if code or "CHECK FAILED" in out2:
                     self.report({"ERROR"}, "Material realm installed, spectral realm not (see the %s text)"
                                 % LOG_NAME)
-                    open_unit(context, unit)
+                    open_unit(context, unit, _ver())
                     return {"CANCELLED"}
 
-        ok, msg = open_unit(context, unit)        # reload: the next install needs fresh vertex maps
+        ok, msg = open_unit(context, unit, _ver())        # reload: the next install needs fresh vertex maps
         if problems:
             self.report({"WARNING"}, "Installed %s, with warnings: %s (see the %s text)" % (
                 unit, problems[0], LOG_NAME))
@@ -1120,7 +1238,7 @@ class REWR_OT_check_budget(_ToolOperator, bpy.types.Operator):
             return {"CANCELLED"}
         unit = context.scene.rewr_open_unit or context.scene.rewr_unit.strip().lower()
         _log("Object video memory near %s" % unit, clear=True)
-        code, out = _run("vrambudget", "--disc", _disc_path(), "--install", _mods_dir(), unit)
+        code, out = _run("vrambudget", "--disc", _disc_path(), "--install", _mods_dir(), *_layers(), unit)
         over = [ln for ln in out.splitlines() if "OVER" in ln]
         if over:
             self.report({"WARNING"}, over[0].strip())
@@ -1140,6 +1258,8 @@ class REWR_OT_launch(_ToolOperator, bpy.types.Operator):
         s = context.scene
         unit = s.rewr_open_unit or s.rewr_unit.strip().lower()
         cmd = [os.path.join(_game_dir(), "rewraithed.exe"), "-area", unit, "-skipmenu", "-skiplogos"]
+        if _ver() != MAIN:
+            cmd += ["-earlierareas", _ver()]
         if s.rewr_play_material:
             cmd.append("-material")
         if s.rewr_play_abilities:
@@ -1177,7 +1297,7 @@ class REWR_OT_revert(_ToolOperator, bpy.types.Operator):
                 os.remove(p)
                 removed.append(os.path.basename(p))
         _log("Reverted %s: removed %s" % (unit, ", ".join(removed) or "nothing"), clear=True)
-        open_unit(context, unit)
+        open_unit(context, unit, _ver())
         self.report({"INFO"}, "%s is back to the disc's version" % unit if removed
                     else "%s had no edited version" % unit)
         return {"FINISHED"}
@@ -1223,6 +1343,9 @@ class REWR_PT_panel(bpy.types.Panel):
 
         box = lay.box()
         box.label(text="1. Unit", icon="WORLD")
+        split = box.split(factor=0.38)
+        split.label(text="Game Version:")
+        split.prop(s, "rewr_version", text="")
         row = box.row(align=True)
         if len(s.rewr_units):
             row.prop_search(s, "rewr_unit", s, "rewr_units", text="", icon="WORLD")
@@ -1230,7 +1353,7 @@ class REWR_PT_panel(bpy.types.Panel):
             row.prop(s, "rewr_unit", text="")
         row.operator("rewraithed.open_unit", text="Open")
         if s.rewr_open_unit:
-            box.label(text="Editing: %s" % s.rewr_open_unit)
+            box.label(text="Editing: %s (%s)" % (s.rewr_open_unit, _ver_label(_ver())))
             row = box.row(align=True)
             row.prop(s, "rewr_realm", expand=True)
 
@@ -1314,7 +1437,7 @@ CLASSES = (RewraithedPreferences, REWR_UnitItem, REWR_LibraryItem, REWR_UL_libra
            REWR_OT_drop_to_floor, REWR_OT_refresh_library, REWR_OT_install, REWR_OT_check_budget,
            REWR_OT_launch, REWR_OT_revert, REWR_OT_show_log, REWR_PT_panel)
 
-SCENE_PROPS = ("rewr_unit", "rewr_units", "rewr_open_unit", "rewr_realm", "rewr_library", "rewr_library_index",
+SCENE_PROPS = ("rewr_version", "rewr_unit", "rewr_units", "rewr_open_unit", "rewr_realm", "rewr_library", "rewr_library_index",
                "rewr_lib_kind", "rewr_snap", "rewr_grid", "rewr_play_material", "rewr_play_abilities", "rewr_labels",
                "rewr_play_skipcutscene", "rewr_play_vramlog")
 
@@ -1327,6 +1450,9 @@ def register():
                                  description="Unit to open: click to pick from every unit in the game, or type to search")
     S.rewr_open_unit = StringProperty(name="Open unit")
     S.rewr_units = CollectionProperty(type=REWR_UnitItem)
+    S.rewr_version = EnumProperty(name="Game Version", items=_version_items, update=_version_update,
+                                  description="Which game's units to open: the port's own, or a prototype's "
+                                              "(extract them with the launcher's Extract Earlier Areas)")
     S.rewr_library = CollectionProperty(type=REWR_LibraryItem)
     S.rewr_library_index = IntProperty(name="Object type")
     S.rewr_lib_kind = EnumProperty(
